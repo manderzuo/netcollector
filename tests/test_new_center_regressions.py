@@ -135,6 +135,35 @@ class TestNewCenterRegressions(NewCenterRegressionBase):
         self.assertEqual(snapshot["policy_version"], "manual-selection-override-v1")
         self.assertEqual(snapshot["reasons"], ["人工选择放行：跳过自动资格限制"])
 
+    def test_lead_list_falls_back_to_comment_and_keeps_video_url(self):
+        """历史证据缺少文本或评论行时，列表仍应显示可用原文/作品地址。"""
+        cid = self.add_comment(content="历史评论原文", user_id="u-fallback")
+        lead_id = self.lead_service.ingest_comment(cid)
+        self.conn.execute(
+            "UPDATE lead_evidence SET evidence_text = NULL WHERE lead_id = ?",
+            (lead_id,),
+        )
+        self.conn.execute(
+            "UPDATE lead_evidence SET comment_id = NULL WHERE lead_id = ?",
+            (lead_id,),
+        )
+        self.conn.commit()
+
+        from leads.repository import LeadQuery
+
+        page = self.lead_repo.list_leads(LeadQuery(page=1, page_size=50))
+        self.assertEqual(page.total, 1)
+        self.assertEqual(page.items[0].summary_text, "")
+        self.assertEqual(page.items[0].source_url, "u1")
+
+        self.conn.execute(
+            "UPDATE lead_evidence SET comment_id = ? WHERE lead_id = ?",
+            (cid, lead_id),
+        )
+        self.conn.commit()
+        page = self.lead_repo.list_leads(LeadQuery(page=1, page_size=50))
+        self.assertEqual(page.items[0].summary_text, "历史评论原文")
+
     def test_lead_is_hidden_after_entering_interaction_center(self):
         """加入互动中心后线索池不应再次展示同一条线索。"""
         cid = self.add_comment(content="普通内容", user_id="u-hidden")

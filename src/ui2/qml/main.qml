@@ -506,7 +506,8 @@ ApplicationWindow {
                 }
                 Text { visible: window.workspaceMode === "collect"; text: "管理"; color: "#60748f"; font.pixelSize: 11; Layout.leftMargin: 10; Layout.topMargin: 18; Layout.bottomMargin: 3 }
                 AppButton {
-                    visible: window.workspaceMode === "collect"
+                    // 数据分析已从工作台导航移除；保留页面实现仅用于兼容旧状态数据。
+                    visible: false
                     Layout.fillWidth: true
                     Layout.preferredHeight: 44
                     onClicked: window.showPage("analytics")
@@ -530,7 +531,8 @@ ApplicationWindow {
                     background: Rectangle { radius: 9; color: backend.currentPage === "diagnostics" ? "#182748" : "transparent"; border.color: backend.currentPage === "diagnostics" ? "#314a83" : "transparent" }
                 }
                 AppButton {
-                    visible: window.workspaceMode === "collect" && backend.authIsAdmin
+                    // 管理员入口统一收纳到个人中心，避免侧栏重复占位。
+                    visible: false
                     Layout.fillWidth: true
                     Layout.preferredHeight: 40
                     onClicked: { backend.refreshAuthUsers(); adminUsersDialog.open() }
@@ -542,7 +544,8 @@ ApplicationWindow {
                     background: Rectangle { radius: 9; color: parent.hovered ? "#182748" : "transparent"; border.color: parent.hovered ? "#314a83" : "transparent" }
                 }
                 AppButton {
-                    visible: window.workspaceMode === "collect" && backend.authIsAdmin
+                    // 管理员入口统一收纳到个人中心，避免侧栏重复占位。
+                    visible: false
                     Layout.fillWidth: true
                     Layout.preferredHeight: 40
                     onClicked: {
@@ -639,17 +642,45 @@ ApplicationWindow {
                     Text { text: "/  全部结果"; color: window.muted; font.pixelSize: 12 }
                     Text { visible: backend.lastError !== ""; text: backend.lastError; color: "#ff9b9b"; Layout.preferredWidth: 250; elide: Text.ElideRight; font.pixelSize: 10 }
                     Item { Layout.fillWidth: true }
-                    TextField {
-                        Layout.preferredWidth: 340
-                        Layout.preferredHeight: 36
-                        placeholderText: "搜索昵称、评论或作品地址"
-                        color: window.ink
-                        placeholderTextColor: "#7187a3"
-                        leftPadding: 14
-                        background: Rectangle { radius: 9; color: "#111d30"; border.color: window.line }
+                    AppButton {
+                        id: personalCenterButton
+                        Layout.preferredWidth: 132
+                        Layout.preferredHeight: 38
+                        text: backend.authEmployeeName || backend.authUsername || "个人中心"
+                        onClicked: personalCenterDialog.open()
+                        contentItem: RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 9
+                            anchors.rightMargin: 9
+                            spacing: 8
+                            Rectangle {
+                                Layout.preferredWidth: 24
+                                Layout.preferredHeight: 24
+                                radius: 12
+                                color: "#5f7cff"
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: String(personalCenterButton.text || "人").slice(0, 1)
+                                    color: "#ffffff"
+                                    font.pixelSize: 11
+                                    font.weight: Font.DemiBold
+                                }
+                            }
+                            Text {
+                                text: personalCenterButton.text
+                                color: window.ink
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                                verticalAlignment: Text.AlignVCenter
+                                font.pixelSize: 11
+                            }
+                        }
+                        background: Rectangle {
+                            radius: 9
+                            color: personalCenterButton.hovered ? "#182748" : "#111d30"
+                            border.color: personalCenterButton.hovered ? window.blue : window.line
+                        }
                     }
-                    Rectangle { Layout.preferredWidth: 38; Layout.preferredHeight: 38; radius: 10; color: "#111d30"; border.color: window.line; Text { anchors.centerIn: parent; text: "♧"; color: window.muted; font.pixelSize: 18 } }
-                    Rectangle { Layout.preferredWidth: 38; Layout.preferredHeight: 38; radius: 19; color: "#5f7cff"; Text { anchors.centerIn: parent; text: "管"; color: "#ffffff"; font.pixelSize: 12 } }
                 }
             }
             Rectangle {
@@ -4322,6 +4353,141 @@ ApplicationWindow {
                     contentItem: Text { text: parent.text; color: parent.hovered ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
                     background: Rectangle { radius: 7; color: parent.hovered ? "#182748" : "transparent" }
                 }
+            }
+        }
+    }
+
+    Dialog {
+        id: personalCenterDialog
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(520, window.width - 56)
+        title: "个人中心"
+        background: Rectangle { radius: 14; color: window.panel; border.color: window.line }
+        header: Rectangle {
+            implicitHeight: 50
+            color: window.panel2
+            border.color: window.line
+            Text {
+                anchors.fill: parent
+                anchors.leftMargin: 16
+                anchors.rightMargin: 52
+                text: personalCenterDialog.title
+                color: window.ink
+                verticalAlignment: Text.AlignVCenter
+                font.pixelSize: 16
+                font.weight: Font.DemiBold
+            }
+            AppButton {
+                anchors.right: parent.right
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                width: 32
+                height: 32
+                text: "×"
+                onClicked: personalCenterDialog.close()
+                contentItem: Text {
+                    text: parent.text
+                    color: parent.hovered ? window.ink : window.muted
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    font.pixelSize: 21
+                }
+                background: Rectangle { radius: 7; color: parent.hovered ? "#263952" : "transparent" }
+            }
+        }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 76
+                radius: 10
+                color: "#17273d"
+                border.color: window.line
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    spacing: 10
+                    Rectangle {
+                        Layout.preferredWidth: 42
+                        Layout.preferredHeight: 42
+                        radius: 21
+                        color: "#5f7cff"
+                        Text {
+                            anchors.centerIn: parent
+                            text: String(backend.authEmployeeName || backend.authUsername || "人").slice(0, 1)
+                            color: "#ffffff"
+                            font.pixelSize: 17
+                            font.weight: Font.DemiBold
+                        }
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 3
+                        Text { text: backend.authEmployeeName || "未设置姓名"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
+                        Text { text: "账号：" + (backend.authUsername || "未知") + (backend.authIsAdmin ? "  ·  管理员" : "  ·  员工"); color: window.muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
+                    }
+                }
+            }
+            Text { text: "数据同步"; color: window.ink; font.pixelSize: 13; font.weight: Font.Medium }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    text: backend.syncStatus.enabled ? (backend.syncStatus.pending + " 条待上传") : "同步未启用"
+                    color: backend.syncStatus.status === "error" || backend.syncStatus.status === "failed" ? "#ff9b9b" : window.muted
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                    font.pixelSize: 11
+                }
+                AppButton {
+                    text: "立即上传"
+                    enabled: Boolean(backend.syncStatus.enabled)
+                    Layout.preferredWidth: 88
+                    Layout.preferredHeight: 32
+                    onClicked: backend.syncNow()
+                    contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    background: Rectangle { radius: 7; color: parent.enabled ? window.blue : window.panel2; border.color: window.line }
+                }
+            }
+            Text {
+                text: backend.syncStatus.status === "error" || backend.syncStatus.status === "failed" ? ("同步失败：" + (backend.syncStatus.last_error || "未知错误")) : (backend.syncStatus.last_sync_at ? "最近上传：" + backend.syncStatus.last_sync_at : "只上传当前登录员工的数据，不会上传浏览器 Cookie 和 API 密钥")
+                color: backend.syncStatus.status === "error" || backend.syncStatus.status === "failed" ? "#ff9b9b" : window.muted
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.pixelSize: 10
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
+            Text { visible: backend.authIsAdmin; text: "管理员功能"; color: window.ink; font.pixelSize: 13; font.weight: Font.Medium }
+            RowLayout {
+                visible: backend.authIsAdmin
+                Layout.fillWidth: true
+                spacing: 8
+                AppButton {
+                    text: "用户审批"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 34
+                    onClicked: { personalCenterDialog.close(); backend.refreshAuthUsers(); adminUsersDialog.open() }
+                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    background: Rectangle { radius: 7; color: parent.hovered ? "#182748" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
+                }
+                AppButton {
+                    text: "管理员中心"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 34
+                    onClicked: { personalCenterDialog.close(); backend.refreshAdminDashboard(); adminCenterDialog.open() }
+                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    background: Rectangle { radius: 7; color: parent.hovered ? "#182748" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
+                }
+            }
+            Item { Layout.fillHeight: true }
+            AppButton {
+                text: "退出登录"
+                Layout.fillWidth: true
+                Layout.preferredHeight: 38
+                onClicked: { personalCenterDialog.close(); backend.logoutUser() }
+                contentItem: Text { text: parent.text; color: "#ffd9df"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.weight: Font.DemiBold }
+                background: Rectangle { radius: 8; color: parent.hovered ? "#6b3443" : "#4b2a37"; border.color: "#8b4d5a" }
             }
         }
     }

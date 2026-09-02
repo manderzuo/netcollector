@@ -313,7 +313,7 @@ class LeadRepository:
             sort_expression = (
                 "(SELECT COALESCE(e.occurred_at, c.comment_time) "
                 "FROM lead_evidence e "
-                "JOIN comments c ON c.id = e.comment_id "
+                "LEFT JOIN comments c ON c.id = e.comment_id "
                 "LEFT JOIN videos v ON v.id = COALESCE(e.video_id, c.video_id) "
                 "WHERE e.lead_id = l.id" + evidence_filter + " "
                 "ORDER BY COALESCE(e.occurred_at, c.comment_time) DESC, e.id DESC "
@@ -326,21 +326,21 @@ class LeadRepository:
 
         rows = self._conn.execute(
             f"""SELECT l.*, o.name AS owner_name,
-                       (SELECT evidence_text FROM lead_evidence e
+                       (SELECT COALESCE(e.evidence_text, c.content, '') FROM lead_evidence e
                          LEFT JOIN comments c ON c.id = e.comment_id
                          LEFT JOIN videos v ON v.id = COALESCE(e.video_id, c.video_id)
                          WHERE e.lead_id = l.id{evidence_filter}
                          ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1) AS summary_text,
                        (SELECT c.comment_time
                           FROM lead_evidence e
-                          JOIN comments c ON c.id = e.comment_id
+                          LEFT JOIN comments c ON c.id = e.comment_id
                           LEFT JOIN videos v ON v.id = COALESCE(e.video_id, c.video_id)
                          WHERE e.lead_id = l.id{evidence_filter}
                          ORDER BY COALESCE(e.occurred_at, c.comment_time) DESC,
                                   e.id DESC LIMIT 1) AS comment_time,
                        (SELECT v.url
                           FROM lead_evidence e
-                          JOIN comments c ON c.id = e.comment_id
+                          LEFT JOIN comments c ON c.id = e.comment_id
                           LEFT JOIN videos v ON v.id = COALESCE(e.video_id, c.video_id)
                          WHERE e.lead_id = l.id{evidence_filter}
                          ORDER BY COALESCE(e.occurred_at, c.comment_time) DESC,
