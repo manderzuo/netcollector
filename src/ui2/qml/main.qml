@@ -4245,13 +4245,16 @@ ApplicationWindow {
 
     // 账户认证覆盖层：认证成功前不加载任何业务操作入口，避免未审批员工
     // 看到或调用其他员工的本地数据。注册只写入待审批账户，不自动登录。
+    // 这里与已确认的登录设计稿保持同一结构：左侧品牌/能力引导，右侧认证卡片。
     Rectangle {
         id: authOverlay
         anchors.fill: parent
         z: 1000
         visible: !backend.authenticated
-        color: window.color
+        color: "#03142d"
+        clip: true
         property bool registerMode: false
+        property bool showPassword: false
         function submit() {
             if (!authPrimaryButton.enabled) return
             if (authOverlay.registerMode)
@@ -4261,97 +4264,356 @@ ApplicationWindow {
         }
 
         Rectangle {
-            anchors.centerIn: parent
-            width: Math.min(470, parent.width - 48)
-            height: authOverlay.registerMode ? 468 : 410
-            radius: 16
-            color: window.panel
-            border.color: window.line
+            anchors.fill: parent
+            opacity: 0.8
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: "#061a39" }
+                GradientStop { position: 0.52; color: "#03132b" }
+                GradientStop { position: 1.0; color: "#020d20" }
+            }
+        }
 
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 30
-                spacing: 14
+        // 设计稿中的关闭入口，实际关闭窗口，不触碰认证和业务数据。
+        AppButton {
+            id: authCloseButton
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.topMargin: 18
+            anchors.rightMargin: 22
+            width: 36
+            height: 36
+            text: "×"
+            z: 5
+            onClicked: Qt.quit()
+            contentItem: Text {
+                text: parent.text
+                color: parent.hovered ? window.ink : "#d9e6f7"
+                font.pixelSize: 30
+                font.weight: Font.Light
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle { radius: 8; color: parent.hovered ? "#19365c" : "transparent" }
+        }
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    Text { text: authOverlay.registerMode ? "注册员工账号" : "登录工作台"; color: window.ink; font.pixelSize: 24; font.weight: Font.DemiBold; Layout.fillWidth: true }
-                    Text { text: "2.0"; color: window.blue; font.pixelSize: 11 }
-                }
-                Text {
-                    Layout.fillWidth: true
-                    text: authOverlay.registerMode ? "提交后由管理员审批，审批通过后才可登录" : "请输入已审批的工作台账号"
-                    color: window.muted
-                    font.pixelSize: 12
-                    wrapMode: Text.WordWrap
-                }
-                Text { text: "账号"; color: window.muted; font.pixelSize: 11; Layout.topMargin: 8 }
-                TextField {
-                    id: authUsernameField
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 42
-                    color: window.ink
-                    placeholderText: "请输入账号"
-                    placeholderTextColor: "#7187a3"
-                    selectByMouse: true
-                    background: Rectangle { radius: 8; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
-                }
-                Text { visible: authOverlay.registerMode; text: "员工姓名"; color: window.muted; font.pixelSize: 11 }
-                TextField {
-                    id: authEmployeeField
-                    visible: authOverlay.registerMode
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 42
-                    color: window.ink
-                    placeholderText: "请输入真实姓名或称呼"
-                    placeholderTextColor: "#7187a3"
-                    selectByMouse: true
-                    background: Rectangle { radius: 8; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
-                }
-                Text { text: "密码"; color: window.muted; font.pixelSize: 11 }
-                TextField {
-                    id: authPasswordField
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 42
-                    color: window.ink
-                    placeholderText: authOverlay.registerMode ? "至少 6 位" : "请输入密码"
-                    placeholderTextColor: "#7187a3"
-                    echoMode: TextInput.Password
-                    selectByMouse: true
-                    onAccepted: authOverlay.submit()
-                    background: Rectangle { radius: 8; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
-                }
-                Text {
-                    visible: backend.authMessage !== ""
-                    Layout.fillWidth: true
-                    text: backend.authMessage
-                    color: backend.authMessage.indexOf("成功") >= 0 ? window.green : window.amber
-                    font.pixelSize: 11
-                    wrapMode: Text.WordWrap
-                }
-                Item { Layout.fillHeight: true }
-                AppButton {
-                    id: authPrimaryButton
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 42
-                    enabled: authUsernameField.text.trim().length > 0 && authPasswordField.text.length >= 6 && (!authOverlay.registerMode || authEmployeeField.text.trim().length > 0)
-                    text: authOverlay.registerMode ? "提交注册申请" : "登录"
-                    onClicked: authOverlay.submit()
-                    contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 13; font.weight: Font.DemiBold }
-                    background: Rectangle { radius: 8; color: parent.enabled ? window.blue : window.panel2; border.color: parent.hovered && parent.enabled ? "#a7c9ff" : "transparent" }
-                }
-                AppButton {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 34
-                    text: authOverlay.registerMode ? "已有账号，返回登录" : "注册新员工账号"
-                    onClicked: {
-                        authOverlay.registerMode = !authOverlay.registerMode
-                        authUsernameField.text = ""
-                        authEmployeeField.text = ""
-                        authPasswordField.text = ""
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 56
+            anchors.rightMargin: 74
+            anchors.topMargin: 28
+            anchors.bottomMargin: 28
+            spacing: 44
+
+            Item {
+                id: authHero
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumWidth: 440
+                Layout.preferredWidth: authOverlay.width * 0.54
+
+                Column {
+                    anchors.left: parent.left
+                    anchors.leftMargin: Math.max(18, parent.width * 0.12)
+                    anchors.top: parent.top
+                    anchors.topMargin: Math.max(44, parent.height * 0.14)
+                    width: Math.min(620, parent.width * 0.82)
+                    spacing: 12
+                    Text {
+                        text: "多平台采集工作台"
+                        color: window.ink
+                        font.pixelSize: Math.min(44, Math.max(32, authHero.width * 0.045))
+                        font.weight: Font.DemiBold
                     }
-                    contentItem: Text { text: parent.text; color: parent.hovered ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                    background: Rectangle { radius: 7; color: parent.hovered ? "#182748" : "transparent" }
+                    Text {
+                        text: "统一管理采集、互动与发布"
+                        color: "#a9b9d0"
+                        font.pixelSize: 22
+                        font.weight: Font.Light
+                    }
+                    Rectangle { width: 160; height: 2; radius: 1; color: "#238dff"; opacity: 0.85; anchors.leftMargin: 2 }
+                }
+
+                Item {
+                    id: authNetwork
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.topMargin: parent.height * 0.39
+                    anchors.bottomMargin: parent.height * 0.02
+
+                    Canvas {
+                        anchors.fill: parent
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.clearRect(0, 0, width, height)
+                            ctx.lineCap = "round"
+                            var centerX = width * 0.51
+                            var centerY = height * 0.59
+                            var starts = [0.04, 0.17, 0.78, 0.91]
+                            for (var i = 0; i < starts.length; i++) {
+                                var left = i < 2
+                                ctx.beginPath()
+                                ctx.moveTo(width * starts[i], height * (0.33 + (i % 2) * 0.24))
+                                ctx.bezierCurveTo(width * (left ? 0.25 : 0.75), height * (0.28 + (i % 2) * 0.2),
+                                                 width * (left ? 0.38 : 0.64), height * 0.56, centerX, centerY)
+                                ctx.strokeStyle = i % 2 === 0 ? "#1d79e8" : "#0cd5ff"
+                                ctx.globalAlpha = 0.62
+                                ctx.lineWidth = 1.4
+                                ctx.stroke()
+                            }
+                            ctx.globalAlpha = 0.22
+                            ctx.strokeStyle = "#3fa5ff"
+                            ctx.lineWidth = 1
+                            for (var ring = 1; ring <= 3; ring++) {
+                                ctx.beginPath()
+                                ctx.ellipse(centerX, centerY + 30, width * (0.11 + ring * 0.08), 17 + ring * 12, 0, 0, Math.PI * 2)
+                                ctx.stroke()
+                            }
+                            ctx.globalAlpha = 1
+                        }
+                    }
+
+                    Repeater {
+                        model: [
+                            {icon: "▶", x: 0.08, y: 0.04},
+                            {icon: "☁", x: 0.82, y: 0.05},
+                            {icon: "☷", x: 0.04, y: 0.45},
+                            {icon: "◔", x: 0.85, y: 0.46},
+                            {icon: "▥", x: 0.09, y: 0.80},
+                            {icon: "▤", x: 0.82, y: 0.79}
+                        ]
+                        delegate: Rectangle {
+                            property var cardData: modelData
+                            x: authNetwork.width * cardData.x
+                            y: authNetwork.height * cardData.y
+                            width: 62
+                            height: 62
+                            radius: 9
+                            color: "#0b2b50"
+                            border.color: "#2a83d8"
+                            border.width: 1
+                            opacity: 0.93
+                            Text {
+                                anchors.centerIn: parent
+                                text: cardData.icon
+                                color: "#cce9ff"
+                                font.pixelSize: 29
+                                font.weight: Font.Light
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        id: authCoreGlow
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: parent.height * 0.45
+                        width: 150
+                        height: 92
+                        radius: 46
+                        color: "#1477ed"
+                        opacity: 0.16
+                    }
+                    Rectangle {
+                        id: authCoreBase
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: parent.height * 0.68
+                        width: 124
+                        height: 20
+                        radius: 10
+                        color: "#0b5bd0"
+                        border.color: "#5ccfff"
+                        opacity: 0.9
+                    }
+                    Repeater {
+                        model: 3
+                        delegate: Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            y: authNetwork.height * 0.53 - index * 22
+                            width: 58 + index * 12
+                            height: 42
+                            rotation: 30
+                            color: "#123b68"
+                            border.color: index === 1 ? "#5cd6ff" : "#328be7"
+                            opacity: 0.88
+                        }
+                    }
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        y: authNetwork.height * 0.20
+                        width: 3
+                        height: authNetwork.height * 0.30
+                        color: "#58d8ff"
+                        opacity: 0.8
+                    }
+                }
+            }
+
+            Rectangle {
+                id: authCard
+                Layout.alignment: Qt.AlignVCenter
+                Layout.minimumWidth: 440
+                Layout.maximumWidth: 560
+                Layout.preferredWidth: Math.min(520, authOverlay.width * 0.40)
+                Layout.preferredHeight: Math.min(authOverlay.registerMode ? 700 : 650, authOverlay.height - 54)
+                radius: 17
+                color: "#102541"
+                border.color: "#435b7b"
+                border.width: 1
+                opacity: 0.98
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 44
+                    spacing: 12
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "欢迎回来"
+                        color: window.ink
+                        font.pixelSize: 34
+                        font.weight: Font.DemiBold
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: authOverlay.registerMode ? "提交申请后等待管理员审批" : "登录后继续使用工作台"
+                        color: "#b3c0d4"
+                        font.pixelSize: 17
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    Item { Layout.preferredHeight: 10 }
+
+                    Text { text: "账号"; color: window.ink; font.pixelSize: 16 }
+                    TextField {
+                        id: authUsernameField
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 54
+                        color: window.ink
+                        leftPadding: 48
+                        placeholderText: "请输入账号"
+                        placeholderTextColor: "#7d92ad"
+                        selectByMouse: true
+                        font.pixelSize: 14
+                        background: Rectangle {
+                            radius: 9
+                            color: "#081a31"
+                            border.color: parent.activeFocus ? window.blue : "#49627f"
+                            border.width: parent.activeFocus ? 2 : 1
+                            Text { anchors.left: parent.left; anchors.leftMargin: 15; anchors.verticalCenter: parent.verticalCenter; text: "♙"; color: "#a9bad0"; font.pixelSize: 25 }
+                        }
+                    }
+
+                    Text { visible: authOverlay.registerMode; text: "员工姓名"; color: window.ink; font.pixelSize: 16 }
+                    TextField {
+                        id: authEmployeeField
+                        visible: authOverlay.registerMode
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 54
+                        color: window.ink
+                        leftPadding: 48
+                        placeholderText: "请输入真实姓名或称呼"
+                        placeholderTextColor: "#7d92ad"
+                        selectByMouse: true
+                        font.pixelSize: 14
+                        background: Rectangle {
+                            radius: 9
+                            color: "#081a31"
+                            border.color: parent.activeFocus ? window.blue : "#49627f"
+                            border.width: parent.activeFocus ? 2 : 1
+                            Text { anchors.left: parent.left; anchors.leftMargin: 15; anchors.verticalCenter: parent.verticalCenter; text: "♙"; color: "#a9bad0"; font.pixelSize: 25 }
+                        }
+                    }
+
+                    Text { text: "密码"; color: window.ink; font.pixelSize: 16 }
+                    TextField {
+                        id: authPasswordField
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 54
+                        color: window.ink
+                        leftPadding: 48
+                        rightPadding: 50
+                        placeholderText: authOverlay.registerMode ? "至少 6 位" : "请输入密码"
+                        placeholderTextColor: "#7d92ad"
+                        echoMode: authOverlay.showPassword ? TextInput.Normal : TextInput.Password
+                        selectByMouse: true
+                        font.pixelSize: 14
+                        onAccepted: authOverlay.submit()
+                        background: Rectangle {
+                            radius: 9
+                            color: "#081a31"
+                            border.color: parent.activeFocus ? window.blue : "#49627f"
+                            border.width: parent.activeFocus ? 2 : 1
+                            Text { anchors.left: parent.left; anchors.leftMargin: 15; anchors.verticalCenter: parent.verticalCenter; text: "▣"; color: "#a9bad0"; font.pixelSize: 21 }
+                            AppButton {
+                                anchors.right: parent.right
+                                anchors.rightMargin: 9
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 34
+                                height: 34
+                                text: authOverlay.showPassword ? "◉" : "◎"
+                                onClicked: authOverlay.showPassword = !authOverlay.showPassword
+                                contentItem: Text { text: parent.text; color: parent.hovered ? window.ink : "#9db0c8"; font.pixelSize: 21; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                background: Rectangle { radius: 7; color: parent.hovered ? "#173456" : "transparent" }
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 2
+                        AppCheckBox { id: authRememberBox; text: "记住登录状态"; checked: false; Layout.fillWidth: true }
+                    }
+                    Text {
+                        visible: backend.authMessage !== ""
+                        Layout.fillWidth: true
+                        text: backend.authMessage
+                        color: backend.authMessage.indexOf("成功") >= 0 ? window.green : window.amber
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Item { Layout.fillHeight: true; Layout.minimumHeight: 5 }
+
+                    AppButton {
+                        id: authPrimaryButton
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 54
+                        enabled: authUsernameField.text.trim().length > 0 && authPasswordField.text.length >= 6 && (!authOverlay.registerMode || authEmployeeField.text.trim().length > 0)
+                        text: authOverlay.registerMode ? "提交注册申请" : "登录"
+                        onClicked: authOverlay.submit()
+                        contentItem: Text { text: parent.text; color: parent.enabled ? "#ffffff" : "#7187a3"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 17; font.weight: Font.DemiBold }
+                        background: Rectangle {
+                            radius: 9
+                            border.color: parent.enabled ? "#4daeff" : "#314963"
+                            gradient: Gradient {
+                                GradientStop { position: 0.0; color: parent.enabled ? "#299dff" : "#172b45" }
+                                GradientStop { position: 1.0; color: parent.enabled ? "#1260d8" : "#112238" }
+                            }
+                        }
+                    }
+                    AppButton {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 50
+                        text: authOverlay.registerMode ? "已有账号，返回登录" : "注册申请"
+                        onClicked: {
+                            authOverlay.registerMode = !authOverlay.registerMode
+                            authOverlay.showPassword = false
+                            authUsernameField.text = ""
+                            authEmployeeField.text = ""
+                            authPasswordField.text = ""
+                        }
+                        contentItem: Text { text: parent.text; color: parent.hovered ? "#63bcff" : "#36a5ff"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 17 }
+                        background: Rectangle { radius: 9; color: parent.hovered ? "#122f53" : "transparent"; border.color: "#2294ff"; border.width: 1 }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#36506f"; opacity: 0.75; Layout.topMargin: 8 }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignHCenter
+                        spacing: 10
+                        Rectangle { width: 14; height: 14; radius: 7; color: backend.connectionText === "后台服务已连接" ? "#35d49a" : window.amber }
+                        Text { text: backend.connectionText === "后台服务已连接" ? "服务连接正常" : backend.connectionText; color: "#c4d2e4"; font.pixelSize: 16 }
+                    }
                 }
             }
         }
