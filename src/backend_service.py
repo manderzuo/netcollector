@@ -2077,7 +2077,14 @@ class BackendService:
         draft_id = self._int_arg(args, "draft_id")
         account_id = self._int_arg(args, "account_id")
         platform = str(args.get("platform") or "").strip().lower()
-        scheduled_at = str(args.get("scheduled_at") or "").strip()
+        raw_scheduled_at = str(args.get("scheduled_at") or "").strip()
+        try:
+            from .time_utils import normalize_scheduled_at  # type: ignore
+        except ImportError:  # pragma: no cover - 顶层脚本入口
+            from time_utils import normalize_scheduled_at  # type: ignore
+        # 后台命令本身也做一次校验，避免绕过 QML 直接提交过去时间或把
+        # 运行机器的系统时区误当成业务时区。空值仍代表立即加入待发布队列。
+        scheduled_at = normalize_scheduled_at(raw_scheduled_at) if raw_scheduled_at else ""
         with self._lead_lock:
             conn = self._lead_connection()
             try:

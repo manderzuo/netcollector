@@ -14,6 +14,11 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Mapping
 
+try:
+    from ..time_utils import normalize_scheduled_at  # type: ignore
+except ImportError:  # pragma: no cover - 直接以 src 为模块根目录时
+    from time_utils import normalize_scheduled_at  # type: ignore
+
 
 PLATFORMS = ("douyin", "xhs", "bilibili", "weibo")
 PLATFORM_LABELS = {
@@ -332,7 +337,11 @@ class PublishingService:
 
     def schedule_variant(self, *, draft_id: int, platform: str,
                          account_id: int, scheduled_at: str = "") -> int:
-        """创建待发布任务；真实发送仍由后续发布执行器明确授权。"""
+        """创建待发布任务，并把计划时间固定解释为北京时间。
+
+        这里仍只创建队列记录；真实浏览器发送必须经过显式授权和发布执行器。
+        但无论从 GUI 还是后台直接调用，都不能写入已经过去的计划时间。
+        """
         draft_id = int(draft_id)
         account_id = int(account_id)
         platform = str(platform or "").strip().lower()
@@ -351,14 +360,18 @@ class PublishingService:
             raise ValueError("发布账号不存在")
         if str(account["platform"] or "").strip().lower() != platform:
             raise ValueError("发布账号与平台不匹配")
+        raw_scheduled_at = str(scheduled_at or "").strip()
+        normalized_scheduled_at = (
+            normalize_scheduled_at(raw_scheduled_at) if raw_scheduled_at else ""
+        )
         now = _now()
         with self.conn:
             cursor = self.conn.execute(
                 "INSERT INTO publish_jobs "
                 "(variant_id, account_id, scheduled_at, status, current_step, "
                 "real_send_authorized, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, 0, ?, ?)",
-                (int(row["id"]), account_id, str(scheduled_at or "").strip() or None,
-                 "scheduled" if str(scheduled_at or "").strip() else "queued", now, now),
+                (int(row["id"]), account_id, normalized_scheduled_at or None,
+                 "scheduled" if normalized_scheduled_at else "queued", now, now),
             )
             self.conn.execute(
                 "UPDATE publish_drafts SET status = 'queued', updated_at = ? WHERE id = ?",

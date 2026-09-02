@@ -2498,6 +2498,9 @@ ApplicationWindow {
                 property bool realPublishEnabled: false
                 property string publishTimeMode: "now"
                 property string scheduledAt: ""
+                property string scheduleDate: ""
+                property string scheduleHour: ""
+                property string scheduleMinute: ""
                 property string publishTab: "publish"
                 property string accountInfoPlatform: "douyin"
                 property string accountInfoAccountId: "0"
@@ -2751,6 +2754,120 @@ ApplicationWindow {
                     }
                     return false
                 }
+                function padSchedulePart(value) {
+                    var number = Number(value || 0)
+                    return number < 10 ? "0" + number : String(number)
+                }
+                function beijingClockParts() {
+                    var raw = String(backend.beijingNowText || "")
+                    var match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(raw)
+                    if (!match) return {year: 2000, month: 1, day: 1, hour: 0, minute: 0, second: 0}
+                    return {
+                        year: Number(match[1]), month: Number(match[2]), day: Number(match[3]),
+                        hour: Number(match[4]), minute: Number(match[5]), second: Number(match[6])
+                    }
+                }
+                function scheduleTodayValue() {
+                    var now = beijingClockParts()
+                    return now.year + "-" + padSchedulePart(now.month) + "-" + padSchedulePart(now.day)
+                }
+                function scheduleDateOptions() {
+                    var now = beijingClockParts()
+                    var base = Date.UTC(now.year, now.month - 1, now.day)
+                    var result = []
+                    // 只暴露未来一年日期，由下拉选择，不允许手写任意值。
+                    for (var offset = 0; offset <= 365; offset++) {
+                        var date = new Date(base + offset * 24 * 60 * 60 * 1000)
+                        var value = date.getUTCFullYear() + "-" + padSchedulePart(date.getUTCMonth() + 1)
+                                   + "-" + padSchedulePart(date.getUTCDate())
+                        result.push({value: value, label: date.getUTCFullYear() + "年"
+                                     + padSchedulePart(date.getUTCMonth() + 1) + "月"
+                                     + padSchedulePart(date.getUTCDate()) + "日"})
+                    }
+                    return result
+                }
+                function scheduleHourOptions() {
+                    var now = beijingClockParts()
+                    var today = scheduleTodayValue()
+                    var result = []
+                    for (var hour = 0; hour < 24; hour++) {
+                        if (String(scheduleDate || "") === today) {
+                            if (hour < now.hour) continue
+                            // 当前小时只在仍有未来分钟时显示。
+                            if (hour === now.hour && now.minute >= 59) continue
+                        }
+                        result.push({value: padSchedulePart(hour), label: padSchedulePart(hour) + "时"})
+                    }
+                    return result
+                }
+                function scheduleMinuteOptions() {
+                    var now = beijingClockParts()
+                    var today = scheduleTodayValue()
+                    var hour = Number(scheduleHour || 0)
+                    var result = []
+                    for (var minute = 0; minute < 60; minute++) {
+                        // 当前分钟可能只剩几秒，保守地从下一分钟开始，避免刚选完就过期。
+                        if (String(scheduleDate || "") === today && hour === now.hour
+                            && minute <= now.minute) continue
+                        result.push({value: padSchedulePart(minute), label: padSchedulePart(minute) + "分"})
+                    }
+                    return result
+                }
+                function scheduleOptionIndex(options, value) {
+                    for (var i = 0; i < options.length; i++)
+                        if (String(options[i].value || "") === String(value || "")) return i
+                    return -1
+                }
+                function syncSchedulePickerControls() {
+                    var dates = scheduleDateOptions()
+                    var hours = scheduleHourOptions()
+                    var minutes = scheduleMinuteOptions()
+                    if (publishScheduleDateChooser && publishScheduleDateChooser.count > 0) {
+                        var dateIndex = scheduleOptionIndex(dates, scheduleDate)
+                        if (dateIndex >= 0 && publishScheduleDateChooser.currentIndex !== dateIndex)
+                            publishScheduleDateChooser.currentIndex = dateIndex
+                    }
+                    if (publishScheduleHourChooser && publishScheduleHourChooser.count > 0) {
+                        var hourIndex = scheduleOptionIndex(hours, scheduleHour)
+                        if (hourIndex >= 0 && publishScheduleHourChooser.currentIndex !== hourIndex)
+                            publishScheduleHourChooser.currentIndex = hourIndex
+                    }
+                    if (publishScheduleMinuteChooser && publishScheduleMinuteChooser.count > 0) {
+                        var minuteIndex = scheduleOptionIndex(minutes, scheduleMinute)
+                        if (minuteIndex >= 0 && publishScheduleMinuteChooser.currentIndex !== minuteIndex)
+                            publishScheduleMinuteChooser.currentIndex = minuteIndex
+                    }
+                }
+                function ensureSchedulePickerSelection() {
+                    var dates = scheduleDateOptions()
+                    if (scheduleOptionIndex(dates, scheduleDate) < 0)
+                        scheduleDate = dates.length ? String(dates[0].value) : ""
+                    var hours = scheduleHourOptions()
+                    if (scheduleOptionIndex(hours, scheduleHour) < 0)
+                        scheduleHour = hours.length ? String(hours[0].value) : ""
+                    var minutes = scheduleMinuteOptions()
+                    if (scheduleOptionIndex(minutes, scheduleMinute) < 0)
+                        scheduleMinute = minutes.length ? String(minutes[0].value) : ""
+                    scheduledAt = buildScheduledAt()
+                    syncSchedulePickerControls()
+                }
+                function ensureScheduleMinuteSelection() {
+                    var minutes = scheduleMinuteOptions()
+                    if (scheduleOptionIndex(minutes, scheduleMinute) < 0)
+                        scheduleMinute = minutes.length ? String(minutes[0].value) : ""
+                    scheduledAt = buildScheduledAt()
+                    syncSchedulePickerControls()
+                }
+                function buildScheduledAt() {
+                    if (!scheduleDate || !scheduleHour || !scheduleMinute) return ""
+                    return String(scheduleDate) + " " + String(scheduleHour) + ":" + String(scheduleMinute)
+                }
+                function scheduleSelectionIsFuture() {
+                    var selected = buildScheduledAt()
+                    var now = String(backend.beijingNowText || "").slice(0, 16)
+                    return Boolean(selected) && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(selected)
+                        && selected > now
+                }
                 function ensurePublishAccountSelection() {
                     if (!selectedAccountIsValid()) selectedAccountId = "0"
                     return Number(selectedAccountId || 0) > 0
@@ -2882,9 +2999,16 @@ ApplicationWindow {
                     if (row.status === "cancelled") return "restore"
                     return ""
                 }
-                Component.onCompleted: requestRefresh()
+                Component.onCompleted: {
+                    ensureSchedulePickerSelection()
+                    requestRefresh()
+                }
                 Connections {
                     target: backend
+                    function onBeijingNowTextChanged() {
+                        if (publishPage.publishTimeMode === "scheduled")
+                            publishPage.ensureSchedulePickerSelection()
+                    }
                     function onViewChanged() {
                         // 账号列表异步返回后自动选中该平台第一个账号，让同步
                         // 按钮首次进入页面就可用，不要求用户重复选择。
@@ -3655,26 +3779,67 @@ ApplicationWindow {
                                         id: publishTimeModeChooser
                                         Layout.fillWidth: true; Layout.preferredHeight: 32
                                         model: [{label: "立即发布", value: "now"}, {label: "定时发布", value: "scheduled"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
-                                        onActivated: publishPage.publishTimeMode = String(currentValue || "now")
+                                        onActivated: {
+                                            publishPage.publishTimeMode = String(currentValue || "now")
+                                            if (publishPage.publishTimeMode === "scheduled")
+                                                publishPage.ensureSchedulePickerSelection()
+                                        }
                                         contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 }
                                         background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
                                     }
                                 }
                                 RowLayout { Layout.fillWidth: true; visible: publishPage.publishTimeMode === "scheduled"
                                     Text { text: "定时于"; color: window.muted; Layout.preferredWidth: 58; font.pixelSize: 10 }
-                                    TextField { id: publishScheduledAt; Layout.fillWidth: true; Layout.preferredHeight: 32; placeholderText: "例如 2026-09-01 10:30"; placeholderTextColor: "#7187a3"; color: window.ink; leftPadding: 9; onTextChanged: publishPage.scheduledAt = text; background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line } }
+                                    ComboBox {
+                                        id: publishScheduleDateChooser
+                                        Layout.fillWidth: true; Layout.preferredHeight: 32; Layout.preferredWidth: 180
+                                        model: publishPage.scheduleDateOptions(); textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
+                                        onActivated: {
+                                            publishPage.scheduleDate = String(currentValue || "")
+                                            publishPage.ensureSchedulePickerSelection()
+                                        }
+                                        contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 8; elide: Text.ElideRight; font.pixelSize: 10 }
+                                        background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
+                                    }
+                                    ComboBox {
+                                        id: publishScheduleHourChooser
+                                        Layout.preferredWidth: 70; Layout.preferredHeight: 32
+                                        model: publishPage.scheduleHourOptions(); textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
+                                        onActivated: {
+                                            publishPage.scheduleHour = String(currentValue || "")
+                                            publishPage.ensureScheduleMinuteSelection()
+                                        }
+                                        contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 10 }
+                                        background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
+                                    }
+                                    Text { text: ":"; color: window.muted; font.pixelSize: 14 }
+                                    ComboBox {
+                                        id: publishScheduleMinuteChooser
+                                        Layout.preferredWidth: 70; Layout.preferredHeight: 32
+                                        model: publishPage.scheduleMinuteOptions(); textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
+                                        onActivated: {
+                                            publishPage.scheduleMinute = String(currentValue || "")
+                                            publishPage.scheduledAt = publishPage.buildScheduledAt()
+                                        }
+                                        contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 10 }
+                                        background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
+                                    }
                                 }
+                                Text { visible: publishPage.publishTimeMode === "scheduled"; text: "北京时间 " + String(backend.beijingNowText || "").slice(0, 16) + " · 只能选择未来时间"; color: publishPage.scheduleSelectionIsFuture() ? window.muted : window.amber; font.pixelSize: 9; Layout.fillWidth: true }
                                 AppCheckBox { text: "仅保存草稿"; checked: publishPage.saveDraftOnly; onToggled: publishPage.saveDraftOnly = checked; Layout.preferredHeight: 24 }
                                 AppButton {
                                     text: "保存定时发布"
                                     visible: publishPage.publishTimeMode === "scheduled"
-                                    enabled: publishPage.selectedDraftId > 0 && publishPage.selectedAccountIsValid() && publishPage.scheduledAt.trim() !== ""
+                                    enabled: publishPage.selectedDraftId > 0 && publishPage.selectedAccountIsValid() && publishPage.scheduleSelectionIsFuture()
                                     Layout.fillWidth: true; Layout.preferredHeight: 34
-                                    onClicked: backend.schedulePublish(
-                                        publishPage.selectedDraftId, publishPage.selectedPlatform,
-                                        Number(publishPage.selectedAccountId), publishPage.scheduledAt,
-                                        publishPage.editorTitle, publishPage.editorBody,
-                                        publishPage.editorTopics)
+                                    onClicked: {
+                                        publishPage.scheduledAt = publishPage.buildScheduledAt()
+                                        backend.schedulePublish(
+                                            publishPage.selectedDraftId, publishPage.selectedPlatform,
+                                            Number(publishPage.selectedAccountId), publishPage.scheduledAt,
+                                            publishPage.editorTitle, publishPage.editorBody,
+                                            publishPage.editorTopics)
+                                    }
                                     contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
                                     background: Rectangle { radius: 7; color: "transparent"; border.color: parent.enabled && parent.hovered ? window.blue : window.line }
                                 }

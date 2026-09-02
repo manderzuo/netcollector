@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +41,7 @@ from interactions.private_message import (  # noqa: E402
 from interactions.service import InteractionService  # noqa: E402
 from leads.repository import LeadRepository  # noqa: E402
 from scheduler import FakeCollector, Scheduler  # noqa: E402
+from time_utils import beijing_now  # noqa: E402
 
 
 class TestBackendProtocol(unittest.TestCase):
@@ -679,6 +681,27 @@ class TestBackendService(unittest.TestCase):
         self.assertEqual(variant["title"], "小红书已编辑标题")
         self.assertEqual(variant["body"], "小红书已编辑正文")
         self.assertEqual(variant["topics"], ["春日内容", "小红书测试"])
+
+    def test_schedule_publish_command_uses_beijing_time_and_rejects_past(self):
+        xhs_account_id = self.scheduler.add_account(
+            "小红书定时账号", bb_window_id="xhs-schedule-window", platform="xhs"
+        )
+        draft_id = self.client.request("create_publish_draft", {
+            "title": "北京时间定时测试", "body": "只做队列模拟", "platforms": ["xhs"],
+        })["draft_id"]
+        future = (beijing_now() + timedelta(days=1)).replace(second=0)
+        result = self.client.request("schedule_publish", {
+            "draft_id": draft_id, "platform": "xhs", "account_id": xhs_account_id,
+            "scheduled_at": future.strftime("%Y-%m-%d %H:%M"),
+            "editor_title": "北京时间定时测试", "editor_body": "只做队列模拟",
+            "editor_topics": "",
+        })
+        self.assertEqual(result["scheduled_at"], future.isoformat(timespec="seconds"))
+        with self.assertRaises(BackendError):
+            self.client.request("schedule_publish", {
+                "draft_id": draft_id, "platform": "xhs", "account_id": xhs_account_id,
+                "scheduled_at": "2020-01-01 00:00",
+            })
 
     def test_send_interactions_marks_per_item_exception_as_failed(self):
         class FailingInteractionService:

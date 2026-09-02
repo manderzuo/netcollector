@@ -383,6 +383,12 @@ class TestUi2State(unittest.TestCase):
         self.assertIn("previewVideoPlayer", qml)
         self.assertIn("publishPage.editorTitle, publishPage.editorBody", qml)
         self.assertIn("publishPage.editorTopics)", qml)
+        self.assertIn("id: publishScheduleDateChooser", qml)
+        self.assertIn("id: publishScheduleHourChooser", qml)
+        self.assertIn("id: publishScheduleMinuteChooser", qml)
+        self.assertIn("function scheduleSelectionIsFuture()", qml)
+        self.assertIn("backend.beijingNowText", qml)
+        self.assertNotIn("id: publishScheduledAt", qml)
 
     def test_async_bridge_does_not_block_and_coalesces_refresh(self):
         client = _FakeBackendClient()

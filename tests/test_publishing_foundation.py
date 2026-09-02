@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -36,6 +37,7 @@ from publishing.workspace import (  # noqa: E402
     ACCOUNT_CONTENT_PLATFORMS,
     PublishingWorkspaceService,
 )
+from time_utils import beijing_now  # noqa: E402
 from ui2.state import PAGE_KEYS, Ui2State  # noqa: E402
 
 
@@ -827,12 +829,24 @@ class PublishingFoundationTests(unittest.TestCase):
         draft_id = self.service.create_draft(
             title="定时内容", body="正文", platforms=["xhs"]
         )
+        future = (beijing_now() + timedelta(days=1)).replace(second=0)
         job_id = self.service.schedule_variant(
             draft_id=draft_id, platform="xhs", account_id=account_id,
-            scheduled_at="2026-09-01 10:30",
+            scheduled_at=future.strftime("%Y-%m-%d %H:%M"),
         )
         self.assertGreater(job_id, 0)
         self.assertEqual(self.service.list_drafts(status="queued")["total"], 1)
+        stored = self.conn.execute(
+            "SELECT scheduled_at, current_step FROM publish_jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        self.assertEqual(stored["scheduled_at"], future.isoformat(timespec="seconds"))
+        self.assertEqual(stored["current_step"], "scheduled")
+        with self.assertRaisesRegex(ValueError, "晚于当前北京时间"):
+            self.service.schedule_variant(
+                draft_id=draft_id, platform="xhs", account_id=account_id,
+                scheduled_at="2026-01-01 10:30",
+            )
         with self.assertRaises(ValueError):
             self.service.schedule_variant(
                 draft_id=draft_id, platform="douyin", account_id=account_id

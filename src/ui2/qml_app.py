@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 try:
-    from PySide6.QtCore import QObject, Property, QUrl, Signal, Slot
+    from PySide6.QtCore import QObject, Property, QTimer, QUrl, Signal, Slot
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
@@ -33,6 +33,11 @@ except ImportError:  # pragma: no cover - python src/ui2/qml_app.py
     from ui2.bridge import Ui2Bridge  # type: ignore
     from backend_protocol import read_endpoint  # type: ignore
 
+try:
+    from ..time_utils import beijing_now  # type: ignore
+except ImportError:  # pragma: no cover - python src/ui2/qml_app.py
+    from time_utils import beijing_now  # type: ignore
+
 
 class QmlBridge(QObject):
     viewChanged = Signal()
@@ -44,6 +49,7 @@ class QmlBridge(QObject):
     syncChanged = Signal()
     adminChanged = Signal()
     logsChanged = Signal()
+    beijingNowTextChanged = Signal()
     # 让 QML 在耗时命令期间立即锁定危险按钮，并在失败时恢复。
     commandFinished = Signal(str, bool, str)
 
@@ -67,6 +73,14 @@ class QmlBridge(QObject):
             "summary": {}, "employees": [], "devices": [], "backups": [],
             "audit": {"items": [], "total": 0, "counts": {}},
         }
+        # 定时发布的可选项和按钮状态需要随着北京时间推进而更新；只发送
+        # 一个轻量信号，不触发后台快照或整页刷新。
+        self._beijing_clock_timer = QTimer(self)
+        # 选择器按分钟粒度工作，30 秒刷新一次足够及时，也不会给常驻的
+        # QML 页面引入每秒一次的模型重算和重绘。
+        self._beijing_clock_timer.setInterval(30000)
+        self._beijing_clock_timer.timeout.connect(self.beijingNowTextChanged)
+        self._beijing_clock_timer.start()
         bridge.add_listener(self._on_view)
         bridge.add_log_listener(self._on_log)
         self.backendEvent.connect(self._apply_view)
@@ -148,6 +162,12 @@ class QmlBridge(QObject):
     @Property(str, notify=viewChanged)
     def currentPage(self) -> str:
         return str(self._view.get("page") or "overview")
+
+    @Property(str, notify=beijingNowTextChanged)
+    def beijingNowText(self) -> str:
+        """当前北京时间，供定时发布选择器显示和过滤过去时间。"""
+
+        return beijing_now().strftime("%Y-%m-%d %H:%M:%S")
 
     @Property(str, notify=viewChanged)
     def pageLabel(self) -> str:

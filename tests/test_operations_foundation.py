@@ -618,6 +618,21 @@ class OperationsFoundationTests(unittest.TestCase):
         scheduler.stop_task(task_id)
         scheduler.shutdown(close_connections=True)
 
+    def test_monitoring_no_more_gate_blocks_automatic_retry_but_allows_force(self):
+        store = MonitoringRuleStore(self.conn, clock=self.clock)
+        store.upsert(
+            self.task_id, interval_seconds=3600, enabled=True,
+            next_run_at="2026-08-24 09:00:00",
+        )
+        self.assertTrue(store.due(self.task_id))
+        CollectionRunStore(self.conn, clock=lambda: self.clock().isoformat(timespec="seconds")).create(
+            self.task_id, "douyin", self.account_id, run_id="simulated-run"
+        )
+        store.mark_run(self.task_id, "simulated-run", no_more=True)
+        self.assertFalse(store.due(self.task_id))
+        # “暂无更多”只拦截后台自动轮询；用户明确继续时仍允许重开搜索闸门。
+        self.assertTrue(store.due(self.task_id, force=True))
+
     def test_monitoring_task_closes_second_run_after_historical_target(self):
         scheduler = Scheduler(self.db_path, collector=FakeCollector(video_count=1))
         scheduler.add_account("监控账号2", "window-monitor-2", "douyin")
