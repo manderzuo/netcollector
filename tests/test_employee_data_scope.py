@@ -410,6 +410,41 @@ class TestEmployeeDataScope(unittest.TestCase):
         self.assertEqual(pushed["changes"][0]["owner_user_id"], int(self.employee_a["id"]))
         self.assertEqual(employee_a.request("sync_status")["pending"], 0)
 
+    def test_lead_summary_statistics_are_owner_scoped(self):
+        employee_a = self._login_employee("employee-a")
+        employee_b = self._login_employee("employee-b")
+        conn = db.init_db(self.db_path, check_same_thread=False)
+        try:
+            rows = [
+                (int(self.employee_a["id"]), "甲高意向", "high", "owned-a"),
+                (int(self.employee_b["id"]), "乙高意向", "high", "owned-b-high"),
+                (int(self.employee_b["id"]), "乙低意向", "low", "owned-b-low"),
+                (None, "历史高意向", "high", "legacy-high"),
+            ]
+            for owner_id, nickname, intent, dedupe in rows:
+                conn.execute(
+                    "INSERT INTO leads (platform, platform_user_id, nickname, dedupe_key, "
+                    "first_seen_at, last_seen_at, data_owner_user_id, intent_level, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("douyin", dedupe, nickname, dedupe, "2026-09-02T10:00:00",
+                     "2026-09-02T10:00:00", owner_id, intent,
+                     "2026-09-02T10:00:00", "2026-09-02T10:00:00"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        stats_a = employee_a.request("list_leads", {
+            "page": 1, "page_size": 20,
+        })["stats"]
+        stats_b = employee_b.request("list_leads", {
+            "page": 1, "page_size": 20,
+        })["stats"]
+        self.assertEqual(stats_a["total"], 1)
+        self.assertEqual(stats_a["high_intent"], 1)
+        self.assertEqual(stats_b["total"], 2)
+        self.assertEqual(stats_b["high_intent"], 1)
+
     def test_sync_client_and_receiver_store_owner_scoped_events(self):
         self.sync_server = create_sync_server(
             "127.0.0.1", 0, "server-token", os.path.join(self.temp.name, "server.db")

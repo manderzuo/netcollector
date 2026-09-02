@@ -624,7 +624,9 @@ class BackendService:
                 except ImportError:  # pragma: no cover
                     from leads.dashboard import DashboardQueryService  # type: ignore
                 try:
-                    stats = DashboardQueryService(conn).summary()
+                    stats = DashboardQueryService(conn).summary(
+                        data_owner_user_id=owner_id
+                    )
                     stats = dict(stats)
                     if owner_id is not None:
                         owner_clause = " WHERE data_owner_user_id = ?"

@@ -18,8 +18,8 @@ class DashboardQueryService:
         self._conn = conn
 
     # ------------------------------------------------------------------
-    def summary(self) -> Dict[str, Any]:
-        """总览核心指标（8.5）。"""
+    def summary(self, data_owner_user_id: int | None = None) -> Dict[str, Any]:
+        """总览核心指标（8.5），可按员工数据归属范围统计。"""
         today = datetime.now().strftime("%Y-%m-%d")
         soon_expire_from = datetime.now().isoformat(timespec="seconds")
         soon_expire_to = (datetime.now() + timedelta(hours=48)).isoformat(timespec="seconds")
@@ -28,26 +28,43 @@ class DashboardQueryService:
             row = self._conn.execute(sql, params).fetchone()
             return row[0] if row else 0
 
-        stats = {
-            "today_new": _one(
-                "SELECT COUNT(*) FROM leads WHERE substr(created_at,1,10) = ?", (today,)),
-            "henan": _one(
-                "SELECT COUNT(*) FROM leads WHERE pool = ?", (Pool.HENAN,)),
-            "high_intent": _one(
-                "SELECT COUNT(*) FROM leads WHERE intent_level = ?", (IntentLevel.HIGH,)),
-            "expiring_48h": _one(
-                """SELECT COUNT(*) FROM leads
-                   WHERE freshness_bucket = ?
-                     AND last_interaction_at >= ?
-                     AND last_interaction_at <= ?""",
-                (FreshnessBucket.COOLING, soon_expire_from, soon_expire_to)),
-            "region_review": _one(
-                "SELECT COUNT(*) FROM leads WHERE pool = ?", (Pool.REGION_REVIEW,)),
-            "awaiting_review": _one(
+        def _lead_count(condition: str = "", params=()) -> int:
+            """统计线索时统一附加员工数据归属条件。"""
+            sql = "SELECT COUNT(*) FROM leads"
+            values = []
+            if data_owner_user_id is not None:
+                sql += " WHERE data_owner_user_id = ?"
+                values.append(int(data_owner_user_id))
+            if condition:
+                sql += " AND " if data_owner_user_id is not None else " WHERE "
+                sql += condition
+                values.extend(params)
+            return int(_one(sql, tuple(values)))
+
+        if data_owner_user_id is None:
+            awaiting_review = _one(
                 "SELECT COUNT(*) FROM interaction_drafts WHERE status = ?",
-                (DraftStatus.PENDING_REVIEW,)),
-            "suppressed": _one(
-                "SELECT COUNT(*) FROM leads WHERE status = ?", (LeadStatus.SUPPRESSED,)),
+                (DraftStatus.PENDING_REVIEW,),
+            )
+        else:
+            awaiting_review = _one(
+                "SELECT COUNT(*) FROM interaction_drafts d "
+                "JOIN leads l ON l.id = d.lead_id "
+                "WHERE l.data_owner_user_id = ? AND d.status = ?",
+                (int(data_owner_user_id), DraftStatus.PENDING_REVIEW),
+            )
+
+        stats = {
+            "today_new": _lead_count("substr(created_at,1,10) = ?", (today,)),
+            "henan": _lead_count("pool = ?", (Pool.HENAN,)),
+            "high_intent": _lead_count("intent_level = ?", (IntentLevel.HIGH,)),
+            "expiring_48h": _lead_count(
+                "freshness_bucket = ? AND last_interaction_at >= ? "
+                "AND last_interaction_at <= ?",
+                (FreshnessBucket.COOLING, soon_expire_from, soon_expire_to)),
+            "region_review": _lead_count("pool = ?", (Pool.REGION_REVIEW,)),
+            "awaiting_review": awaiting_review,
+            "suppressed": _lead_count("status = ?", (LeadStatus.SUPPRESSED,)),
         }
         return stats
 
