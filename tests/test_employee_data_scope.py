@@ -259,6 +259,78 @@ class TestEmployeeDataScope(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_same_connection_relogin_switches_task_account_lead_and_interaction_scope(self):
+        employee_a = self._login_employee("employee-a")
+        employee_b = self._login_employee("employee-b")
+
+        task_a = employee_a.request("create_task", {
+            "keyword": "甲的任务", "platform": "douyin", "target_count": 1,
+        })["task_id"]
+        task_b = employee_b.request("create_task", {
+            "keyword": "乙的任务", "platform": "douyin", "target_count": 1,
+        })["task_id"]
+        account_a = employee_a.request("add_account", {
+            "name": "甲的账号", "bb_window_id": "window-a", "platform": "douyin",
+        })["account_id"]
+        account_b = employee_b.request("add_account", {
+            "name": "乙的账号", "bb_window_id": "window-b", "platform": "douyin",
+        })["account_id"]
+
+        conn = db.init_db(self.db_path, check_same_thread=False)
+        try:
+            for owner_id, nickname in ((self.employee_a["id"], "甲的线索"),
+                                       (self.employee_b["id"], "乙的线索")):
+                conn.execute(
+                    "INSERT INTO leads (platform, platform_user_id, nickname, dedupe_key, "
+                    "first_seen_at, last_seen_at, data_owner_user_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("douyin", f"relogin-{owner_id}", nickname,
+                     f"relogin-dedupe-{owner_id}", "2026-09-02T10:00:00",
+                     "2026-09-02T10:00:00", int(owner_id), "2026-09-02T10:00:00",
+                     "2026-09-02T10:00:00"),
+                )
+                interaction_lead = conn.execute(
+                    "INSERT INTO leads (platform, platform_user_id, nickname, dedupe_key, "
+                    "first_seen_at, last_seen_at, data_owner_user_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("douyin", f"relogin-interaction-{owner_id}", f"{nickname}互动",
+                     f"relogin-interaction-dedupe-{owner_id}", "2026-09-02T10:00:00",
+                     "2026-09-02T10:00:00", int(owner_id), "2026-09-02T10:00:00",
+                     "2026-09-02T10:00:00"),
+                )
+                conn.execute(
+                    "INSERT INTO interaction_drafts "
+                    "(lead_id, channel, content, generation_mode, policy_snapshot, status, "
+                    "created_at, updated_at, interaction_type, source_content) "
+                    "VALUES (?, 'comment', ?, 'template', '{}', 'draft', ?, ?, "
+                    "'comment_reply', ?)",
+                    (int(interaction_lead.lastrowid), f"回复{nickname}",
+                     "2026-09-02T10:00:00", "2026-09-02T10:00:00", f"评论{nickname}"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        employee_a.request("auth_logout")
+        employee_a.request("auth_login", {
+            "username": "employee-b", "password": "secret6",
+        })
+
+        status = employee_a.request("status")
+        self.assertEqual(set(status["tasks"]), {str(task_b)})
+        self.assertEqual(set(status["accounts"]), {f"douyin:{account_b}"})
+        self.assertNotIn(str(task_a), status["tasks"])
+        self.assertNotIn(f"douyin:{account_a}", status["accounts"])
+        lead_rows = employee_a.request("list_leads", {
+            "page": 1, "page_size": 20,
+        })["items"]
+        self.assertEqual([item["nickname"] for item in lead_rows], ["乙的线索"])
+        interaction_rows = employee_a.request("list_interactions", {
+            "status": "draft", "interaction_type": "comment_reply",
+            "page": 1, "page_size": 20,
+        })["items"]
+        self.assertEqual([item["nickname"] for item in interaction_rows], ["乙的线索互动"])
+
     def test_leads_are_isolated_and_manual_sync_is_owner_scoped(self):
         employee_a = self._login_employee("employee-a")
         employee_b = self._login_employee("employee-b")

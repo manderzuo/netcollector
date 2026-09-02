@@ -132,6 +132,61 @@ class Ui2State:
             "export_path": "",
         }
 
+    def reset_user_scoped(self) -> None:
+        """清空当前登录用户的业务视图。
+
+        登录切换不会销毁 QML 页面实例，不能依赖 ``Component.onCompleted``
+        再次触发来清理列表。这里集中重置所有会按员工隔离的内存快照，
+        同时保留全局运行日志，避免上一个用户的数据短暂留在新用户界面。
+        """
+        self.snapshot = {
+            "paused": False,
+            "tasks": {},
+            "accounts": {},
+            "totals": {},
+        }
+        self.leads = {
+            "items": [], "total": 0, "page": 1, "page_size": 50, "pages": 0,
+            "tasks": [], "provinces": [], "stats": {},
+        }
+        self.interactions = {
+            "items": [], "total": 0, "page": 1, "page_size": 50, "pages": 0,
+            "status": "draft", "accounts": [], "templates": [], "custom_variables": [],
+        }
+        self.publishing = {
+            "items": [], "total": 0, "page": 1, "page_size": 50,
+            "pages": 0, "status": "all", "platform": "",
+            "status_options": [], "platform_options": [],
+            "account_contents": [], "account_content_total": 0,
+            "account_content_page": 1, "account_content_pages": 0,
+            "account_content_account_id": 0, "account_content_platform": "",
+            "account_content_sync_source": "", "account_content_sync_status": "",
+            "account_content_sync_error": "", "account_content_profile_url": "",
+            "account_content_selected": {}, "account_content_comments": [],
+            "generated_contents": [], "generated_total": 0,
+            "messages": [], "message_total": 0, "message_unread": 0,
+            "message_groups": [], "message_type": "", "message_type_options": [],
+            "message_sync_status": "", "message_sync_summary": {},
+        }
+        # 日志是整台工作台的审计记录，继续保留；账号健康摘要属于用户业务
+        # 视图，切换账号后必须重新获取，不能沿用上一账号的结果。
+        self.diagnostics = {
+            "checked_at": "",
+            "bitbrowser": {},
+            "llm_api": {},
+            "accounts": [],
+            "health": [],
+            "logs": list(self.diagnostics.get("logs") or []),
+            "log_stats": copy.deepcopy(self.diagnostics.get("log_stats") or {
+                "total": 0, "normal": 0, "warning": 0, "error": 0, "alerts": [],
+            }),
+            "bitbrowser_inspection": {"healthy": False, "checks": [], "windows": []},
+            "live_health": {"rows": [], "checked_at": "", "send_executed": False},
+            "export_path": "",
+        }
+        self.connection = "connected"
+        self.last_error = ""
+
     @property
     def page_index(self) -> int:
         return PAGE_KEYS.index(self.page)

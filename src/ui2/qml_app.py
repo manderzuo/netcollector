@@ -96,18 +96,28 @@ class QmlBridge(QObject):
         event = dict(event or {})
         kind = str(event.get("kind") or "")
         if kind == "login":
+            user = dict(event.get("user") or {})
+            self._bridge.set_auth_scope(user)
+            self._keyword_groups = []
+            self.keywordGroupsChanged.emit()
             self._auth.update({
                 "authenticated": True,
-                "user": dict(event.get("user") or {}),
+                "user": user,
                 "message": "",
             })
             self.authChanged.emit()
             self._bridge.refresh_async()
+            self._bridge.refresh_leads_async()
+            self._bridge.refresh_interactions_async()
+            self.refreshKeywordGroups()
             self.refreshSyncStatus()
-            if str((event.get("user") or {}).get("role") or "") == "admin":
+            if str(user.get("role") or "") == "admin":
                 self.refreshAdminDashboard()
             return
         if kind == "logout":
+            self._bridge.set_auth_scope(None)
+            self._keyword_groups = []
+            self.keywordGroupsChanged.emit()
             self._auth.update({"authenticated": False, "user": None, "message": ""})
             self._auth["users"] = []
             self._sync = {"enabled": False, "server_url": "", "device_name": "",

@@ -221,6 +221,71 @@ class TestUi2State(unittest.TestCase):
         self.assertEqual(rows[0]["status_label"], "需人工")
         self.assertEqual(rows[0]["account_details"][0]["status_label"], "需登录")
 
+    def test_reset_user_scoped_clears_business_views_but_keeps_logs(self):
+        state = Ui2State()
+        state.apply_snapshot({
+            "tasks": {"7": {"id": 7, "keyword": "甲的任务"}},
+            "accounts": {"douyin:14": {"id": 14, "name": "甲的账号"}},
+            "totals": {"tasks": 1, "accounts": 1},
+        })
+        state.apply_leads({
+            "items": [{"id": 9, "nickname": "甲用户"}], "total": 1,
+        })
+        state.apply_interactions({
+            "items": [{"draft_id": 12, "nickname": "甲用户"}], "total": 1,
+        })
+        state.append_log_event({"timestamp": "2026-09-02T15:00:00+08:00",
+                                "message": "保留审计日志", "level": "info"})
+
+        state.reset_user_scoped()
+        view = state.to_view_model()
+        self.assertEqual(view["tasks"], [])
+        self.assertEqual(view["accounts"], [])
+        self.assertEqual(view["leads"], [])
+        self.assertEqual(view["interactions"], [])
+        self.assertEqual(view["publishing"]["items"], [])
+        self.assertEqual(view["diagnostics"]["logs"][-1]["message"], "保留审计日志")
+
+    def test_bridge_auth_scope_resets_state_and_increments_generation(self):
+        bridge = Ui2Bridge()
+        bridge.state.apply_leads({
+            "items": [{"id": 1, "nickname": "上一账号"}], "total": 1,
+        })
+        bridge.state.apply_interactions({
+            "items": [{"draft_id": 1, "nickname": "上一账号"}], "total": 1,
+        })
+        first = bridge.session_generation()
+
+        bridge.set_auth_scope({"id": 2, "role": "employee"})
+
+        self.assertEqual(bridge.session_generation(), first + 1)
+        self.assertEqual(bridge.state.lead_rows(), [])
+        self.assertEqual(bridge.state.interaction_rows(), [])
+        self.assertEqual(bridge.state.task_rows(), [])
+        self.assertEqual(bridge.state.account_rows(), [])
+
+    def test_bridge_ignores_snapshot_from_previous_auth_scope(self):
+        bridge = Ui2Bridge()
+        bridge.set_auth_scope({"id": 2, "role": "employee"})
+
+        bridge._on_backend_event({
+            "event": "state_snapshot",
+            "payload": {
+                "_auth_scope": {"user_id": 1, "role": "admin"},
+                "tasks": {"1": {"id": 1, "keyword": "管理员任务"}},
+            },
+        })
+        self.assertEqual(bridge.state.task_rows(), [])
+
+        bridge._on_backend_event({
+            "event": "state_snapshot",
+            "payload": {
+                "_auth_scope": {"user_id": 2, "role": "employee"},
+                "tasks": {"2": {"id": 2, "keyword": "员工任务"}},
+            },
+        })
+        self.assertEqual([row["id"] for row in bridge.state.task_rows()], [2])
+
     def test_bridge_without_backend_is_safe_and_explicit(self):
         bridge = Ui2Bridge()
         view = bridge.connect()

@@ -3474,7 +3474,8 @@ class BackendService:
             if not isinstance(auth_user, Mapping):
                 if command == "status":
                     return make_response(
-                        request_id, ok=True, result={"auth_required": True}
+                        request_id, ok=True,
+                        result={"auth_required": True, "_auth_scope": self._auth_scope(client)},
                     )
                 return make_response(
                     request_id, ok=False,
@@ -3533,6 +3534,19 @@ class BackendService:
     def _is_admin_client(cls, client) -> bool:
         user = cls._client_user(client)
         return bool(user and str(user.get("role") or "") == "admin")
+
+    @classmethod
+    def _auth_scope(cls, client) -> dict[str, Any]:
+        """返回状态快照所属的认证范围，供前端丢弃过期快照。"""
+        user = cls._client_user(client) or {}
+        try:
+            user_id = int(user.get("id") or 0)
+        except (TypeError, ValueError):
+            user_id = 0
+        return {
+            "user_id": user_id if user_id > 0 else 0,
+            "role": str(user.get("role") or ""),
+        }
 
     @classmethod
     def _owner_user_id(cls, client) -> int | None:
@@ -3612,12 +3626,13 @@ class BackendService:
 
     def _scoped_status_report(self, client=None) -> dict[str, Any]:
         """按登录用户裁剪状态快照；管理员仍获得全量视图。"""
+        scope = self._auth_scope(client)
         if client is not None and not self._client_user(client):
-            return {"auth_required": True}
+            return {"auth_required": True, "_auth_scope": scope}
         snapshot = self.scheduler.status_report()
         owner_id = self._owner_user_id(client)
         if owner_id is None:
-            return snapshot
+            return {**snapshot, "_auth_scope": scope}
 
         def owned(item: Mapping[str, Any]) -> bool:
             try:
@@ -3665,7 +3680,8 @@ class BackendService:
             totals["leads"] = 0
             totals["interactions"] = 0
         return {**snapshot, "tasks": tasks, "accounts": accounts, "totals": totals,
-                "paused": bool(snapshot.get("paused")) and bool(tasks)}
+                "paused": bool(snapshot.get("paused")) and bool(tasks),
+                "_auth_scope": scope}
 
     def _require_owned_row(self, table: str, record_id: int, owner_column: str,
                            client, label: str) -> dict[str, Any]:
