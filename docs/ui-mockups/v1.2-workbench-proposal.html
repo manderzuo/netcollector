@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>采集工作台 v1.2 界面方案</title>
+<style>
+  :root {
+    --bg:#080b12; --sidebar:#0b101a; --surface:#101722; --surface2:#141d2b;
+    --hover:#182335; --border:#263247; --border2:rgba(255,255,255,.075);
+    --text:#f3f6fb; --sub:#9aa8be; --muted:#6f7e95; --blue:#6180ff;
+    --blue2:#87a0ff; --green:#35d29a; --yellow:#f4b74a; --red:#ff6d78;
+  }
+  *{box-sizing:border-box} html,body{margin:0;width:100%;height:100%;overflow:hidden}
+  body{font-family:"Microsoft YaHei UI","Segoe UI",sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+  .app{width:1440px;height:900px;display:grid;grid-template-columns:216px 1fr;background:radial-gradient(circle at 70% -30%,#172038 0,transparent 42%),var(--bg)}
+  .sidebar{border-right:1px solid var(--border2);background:rgba(11,16,26,.96);padding:22px 14px;display:flex;flex-direction:column}
+  .brand{display:flex;align-items:center;gap:11px;padding:0 10px 25px;font-size:17px;font-weight:700;letter-spacing:.2px}
+  .mark{width:32px;height:32px;border-radius:10px;background:linear-gradient(145deg,#6f8bff,#485fe0);display:grid;place-items:center;box-shadow:0 8px 22px rgba(89,116,255,.28)}
+  .mark svg{width:19px;height:19px}.version{font-size:10px;color:#9eaeff;background:#202b52;padding:3px 6px;border-radius:999px;margin-left:auto}
+  .group{font-size:11px;color:#56657b;padding:7px 12px;text-transform:uppercase;letter-spacing:1px}
+  .nav{height:44px;margin:4px 0;border-radius:8px;padding:0 12px;display:flex;align-items:center;gap:11px;color:#95a4ba;font-weight:500}
+  .nav svg{width:19px;height:19px;stroke:#7d8ca4;fill:none;stroke-width:1.7}
+  .nav.active{background:linear-gradient(90deg,rgba(97,128,255,.22),rgba(97,128,255,.09));color:#eef2ff;box-shadow:inset 3px 0 0 var(--blue)}
+  .nav.active svg{stroke:#8ea4ff}.nav .badge{margin-left:auto;background:#26324a;color:#bdc7d7;padding:2px 7px;border-radius:10px;font-size:11px}
+  .spacer{flex:1}.health{margin:12px 4px 0;border:1px solid var(--border);border-radius:11px;background:#0d141f;padding:13px}
+  .health-title{display:flex;align-items:center;font-weight:600}.dot{width:7px;height:7px;background:var(--green);border-radius:50%;box-shadow:0 0 9px var(--green);margin-right:8px}
+  .health p{color:#75849a;font-size:11px;line-height:1.6;margin:9px 0 0}.health strong{color:#cbd5e5;font-weight:500}
+  .main{min-width:0;display:grid;grid-template-rows:70px 1fr}
+  .topbar{border-bottom:1px solid var(--border2);display:flex;align-items:center;padding:0 26px;gap:16px;background:rgba(8,11,18,.7)}
+  .page-title{font-size:18px;font-weight:680}.crumb{color:#66768d;font-size:12px;margin-left:2px}
+  .search{margin-left:auto;width:340px;height:36px;border:1px solid var(--border);border-radius:8px;background:#0d141f;color:#77869c;display:flex;align-items:center;padding:0 12px;gap:8px}
+  .search svg{width:16px;stroke:#7f8ca1;fill:none}.key{margin-left:auto;font-size:10px;border:1px solid #303b4d;padding:2px 6px;border-radius:4px;color:#65758c}
+  .iconbtn{width:36px;height:36px;border:1px solid var(--border);border-radius:8px;background:#0e1520;display:grid;place-items:center}.iconbtn svg{width:17px;stroke:#91a0b5;fill:none}
+  .avatar{width:34px;height:34px;border-radius:10px;background:linear-gradient(145deg,#263658,#171f31);display:grid;place-items:center;color:#b9c8ff;font-weight:700;border:1px solid #31405b}
+  .content{padding:22px 26px 24px;display:grid;grid-template-rows:auto auto 1fr;gap:16px;min-height:0}
+  .headline{display:flex;align-items:flex-end}.headline h1{font-size:27px;letter-spacing:-.7px;margin:0 0 5px;font-weight:670}.headline p{margin:0;color:#7f8fa5;font-size:13px}.actions{margin-left:auto;display:flex;gap:8px}
+  button{font-family:inherit;color:#c9d3e2;background:#111925;border:1px solid var(--border);height:36px;padding:0 13px;border-radius:7px;font-size:13px}
+  button.primary{background:var(--blue);border-color:var(--blue);color:white;font-weight:600;box-shadow:0 8px 18px rgba(74,104,235,.23)}
+  .metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  .metric{height:90px;border:1px solid var(--border2);border-radius:10px;background:linear-gradient(145deg,rgba(20,29,43,.92),rgba(14,21,32,.92));padding:13px 15px;position:relative;overflow:hidden}
+  .metric:after{content:"";position:absolute;right:-22px;top:-35px;width:82px;height:82px;border-radius:50%;background:rgba(97,128,255,.06)}
+  .metric .label{color:#8391a6;font-size:12px}.metric .value{font-size:25px;font-weight:690;margin-top:7px;letter-spacing:-.5px}.metric .trend{position:absolute;right:13px;bottom:13px;color:#67dbae;font-size:11px}.metric.warn .trend{color:#f5bd58}
+  .workspace{border:1px solid var(--border2);border-radius:12px;background:rgba(14,20,30,.88);min-height:0;display:grid;grid-template-columns:minmax(720px,1fr) 320px;overflow:hidden}
+  .list{min-width:0;border-right:1px solid var(--border2);display:grid;grid-template-rows:62px 42px 1fr 46px}
+  .toolbar{padding:13px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border2)}
+  .filter{height:34px;padding:0 11px;border:1px solid #263249;border-radius:7px;background:#111927;color:#aab6c8;display:flex;align-items:center;gap:13px;font-size:12px}.filter span{color:#65758c}.filter.active{border-color:#526bd4;color:#dbe2ff;background:#172040}
+  .toolbar .right{margin-left:auto;display:flex;gap:8px}.check{width:16px;height:16px;border:1px solid #40506a;border-radius:4px;background:#101824}.check.on{background:var(--blue);border-color:var(--blue);position:relative}.check.on:after{content:"✓";font-size:11px;color:white;position:absolute;left:2px;top:-1px}
+  .thead,.row{display:grid;grid-template-columns:34px 150px minmax(260px,1fr) 90px 90px 100px 88px;align-items:center;padding:0 14px;column-gap:8px}
+  .thead{color:#697990;font-size:11px;border-bottom:1px solid var(--border2);background:#0c121c}
+  .rows{min-height:0;overflow:hidden}.row{height:70px;border-bottom:1px solid rgba(255,255,255,.045);color:#dbe2ee}.row:nth-child(even){background:rgba(255,255,255,.018)}.row.selected{background:linear-gradient(90deg,rgba(97,128,255,.14),rgba(97,128,255,.035));box-shadow:inset 2px 0 var(--blue)}
+  .user{min-width:0}.name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{color:#6f7f95;font-size:11px;margin-top:5px;display:flex;align-items:center;gap:6px}.platform{width:18px;height:18px;border-radius:5px;display:inline-grid;place-items:center;color:white;font-size:10px;font-weight:700}.dy{background:#15171b;border:1px solid #4c566a}.xhs{background:#f0445d}.wb{background:#f59b23}.bili{background:#e276a8}
+  .comment{line-height:1.45;max-height:41px;overflow:hidden;color:#cbd4e2}.time{color:#8e9caf;font-size:12px}.score{display:flex;align-items:center;gap:7px}.ring{width:33px;height:33px;border-radius:50%;background:conic-gradient(var(--green) 0 88%,#263247 88%);display:grid;place-items:center}.ring:after{content:"88";width:25px;height:25px;background:#121a26;border-radius:50%;display:grid;place-items:center;font-size:10px;color:#cfeadf}.tag{justify-self:start;padding:4px 8px;border-radius:999px;font-size:11px}.tag.hot{color:#f7c668;background:#3b2c14}.tag.follow{color:#91a6ff;background:#1d294b}.tag.new{color:#6fdcaf;background:#14382e}.more{color:#6f8096;font-size:18px;text-align:center}
+  .pagination{border-top:1px solid var(--border2);display:flex;align-items:center;padding:0 14px;color:#718096;font-size:11px}.pagination .bulk{display:flex;align-items:center;gap:7px;color:#9facbf}.pages{margin-left:auto;display:flex;gap:5px}.page{width:25px;height:25px;border:1px solid #273348;border-radius:5px;display:grid;place-items:center}.page.active{background:#4f66d3;color:white;border-color:#4f66d3}
+  .detail{background:linear-gradient(180deg,rgba(18,26,39,.95),rgba(13,19,29,.95));display:grid;grid-template-rows:auto auto auto 1fr auto;min-height:0}
+  .detail-head{padding:17px;border-bottom:1px solid var(--border2);display:flex;align-items:center}.detail-head strong{font-size:15px}.detail-head span{margin-left:auto;color:#697991;font-size:11px}
+  .profile{padding:16px 17px;display:flex;gap:11px}.bigavatar{width:42px;height:42px;border-radius:12px;background:linear-gradient(145deg,#566fe6,#212c4b);display:grid;place-items:center;font-weight:700}.profile .sub{color:#78879c;font-size:11px;margin-top:5px}.scorecard{margin:0 17px 14px;border:1px solid #273348;border-radius:9px;background:#101824;padding:12px}.scoreline{display:flex;align-items:center}.scoreline b{font-size:19px;color:#71d8ae}.scoreline span{margin-left:auto;color:#6f7e94;font-size:11px}.bar{height:5px;background:#263247;border-radius:4px;margin:9px 0 10px;overflow:hidden}.bar i{display:block;height:100%;width:88%;background:linear-gradient(90deg,#5071f4,#37d39c)}.chips{display:flex;gap:6px;flex-wrap:wrap}.chips em{font-style:normal;background:#182236;border:1px solid #2b3a53;color:#aab8cc;padding:4px 7px;border-radius:5px;font-size:10px}
+  .section{padding:0 17px 12px}.section-title{color:#718198;font-size:11px;margin:0 0 9px}.ai{border:1px solid rgba(97,128,255,.25);background:rgba(78,104,214,.085);border-radius:9px;padding:11px;color:#bfcbe1;font-size:12px;line-height:1.65}.timeline{border-left:1px solid #2a3548;margin-left:4px;padding-left:13px}.event{position:relative;margin-bottom:11px;color:#95a3b7;font-size:11px;line-height:1.5}.event:before{content:"";position:absolute;left:-17px;top:4px;width:7px;height:7px;border-radius:50%;background:#617fff;border:2px solid #131b27}.event b{display:block;color:#c8d2e1;font-weight:500}
+  .detail-actions{padding:13px 17px;border-top:1px solid var(--border2);display:grid;grid-template-columns:1fr 1fr;gap:8px}.detail-actions .primary{grid-column:1/-1}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="mark"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h9M5 17h6" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></div>采集工作台 <span class="version">V1.2</span></div>
+    <div class="group">工作区</div>
+    <div class="nav"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9zm10 7h6V11h-6v9zM4 20h6v-3H4v3zm10-13h6V4h-6v3z"/></svg>采集总览</div>
+    <div class="nav"><svg viewBox="0 0 24 24"><path d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4"/></svg>任务中心 <span class="badge">6</span></div>
+    <div class="nav"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3"/><path d="M5 20c0-4 3-7 7-7s7 3 7 7"/></svg>账号管理</div>
+    <div class="nav active"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-4 2.7-7 6-7M15 6h6M15 10h6M14 15h7M14 19h5"/></svg>线索中心 <span class="badge">284</span></div>
+    <div class="nav"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 3V5zM8 9h8M8 13h5"/></svg>互动中心 <span class="badge">12</span></div>
+    <div class="group" style="margin-top:12px">管理</div>
+    <div class="nav"><svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V4M16 19v-7M22 19H2"/></svg>数据分析</div>
+    <div class="nav"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1-2-4-2 1a8 8 0 0 0-2-1l-.3-2h-5L9 6a8 8 0 0 0-2 1L5 6 3 10l2 1a7 7 0 0 0 0 2l-2 1 2 4 2-1a8 8 0 0 0 2 1l.5 2h5l.5-2a8 8 0 0 0 2-1l2 1 2-4-2-1a7 7 0 0 0 .1-1z"/></svg>设置与诊断</div>
+    <div class="spacer"></div>
+    <div class="health"><div class="health-title"><i class="dot"></i>系统运行正常</div><p>4 个平台适配器在线<br><strong>2 个增量任务正在监控</strong></p></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><div class="page-title">线索中心</div><div class="crumb">/ 全部线索</div><div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg>搜索昵称、评论或作品地址 <span class="key">Ctrl K</span></div><div class="iconbtn"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></div><div class="avatar">管</div></header>
+    <div class="content">
+      <div class="headline"><div><h1>线索中心</h1><p>统一查看采集结果、识别意向并安排后续互动</p></div><div class="actions"><button>导出</button><button>批量打标签</button><button class="primary">＋ 加入互动中心</button></div></div>
+      <div class="metrics">
+        <div class="metric"><div class="label">今日新增线索</div><div class="value">284</div><div class="trend">↑ 18.6%</div></div>
+        <div class="metric"><div class="label">高意向线索</div><div class="value">47</div><div class="trend">16.5%</div></div>
+        <div class="metric"><div class="label">等待跟进</div><div class="value">32</div><div class="trend">今天 9 条</div></div>
+        <div class="metric"><div class="label">互动回复率</div><div class="value">38.2%</div><div class="trend">↑ 4.1%</div></div>
+        <div class="metric warn"><div class="label">需要人工处理</div><div class="value">3</div><div class="trend">验证码 2 · 登录 1</div></div>
+      </div>
+      <div class="workspace">
+        <section class="list">
+          <div class="toolbar"><div class="filter active"><span>任务</span>暑期招生监控⌄</div><div class="filter"><span>平台</span>全部⌄</div><div class="filter"><span>意向</span>高＋中⌄</div><div class="filter"><span>状态</span>未处理⌄</div><div class="right"><button>保存视图</button><button>刷新</button></div></div>
+          <div class="thead"><div class="check"></div><div>用户</div><div>评论原文</div><div>评论时间</div><div>线索评分</div><div>当前状态</div><div>操作</div></div>
+          <div class="rows">
+            <div class="row selected"><div class="check on"></div><div class="user"><div class="name">爱笑的眼睛</div><div class="meta"><i class="platform dy">抖</i>河南 · 郑州</div></div><div class="comment">一斤卖多少钱？可以送到郑州吗，想了解一下具体价格。</div><div class="time">今天 10:26</div><div class="score"><div class="ring"></div><span>高</span></div><div class="tag hot">高意向</div><div class="more">•••</div></div>
+            <div class="row"><div class="check"></div><div class="user"><div class="name">木木的蓝小猪</div><div class="meta"><i class="platform xhs">红</i>河南 · 洛阳</div></div><div class="comment">请问你们这里可以预约试听吗？孩子今年四岁。</div><div class="time">今天 09:48</div><div class="score"><div class="ring" style="background:conic-gradient(#f4b74a 0 72%,#263247 72%)"></div><span>中</span></div><div class="tag follow">待跟进</div><div class="more">•••</div></div>
+            <div class="row"><div class="check"></div><div class="user"><div class="name">半边糖</div><div class="meta"><i class="platform wb">微</i>广东 · 深圳</div></div><div class="comment">上连接，想买点，能发一下详细资料吗？</div><div class="time">昨天 18:32</div><div class="score"><div class="ring" style="background:conic-gradient(#f4b74a 0 69%,#263247 69%)"></div><span>中</span></div><div class="tag new">新线索</div><div class="more">•••</div></div>
+            <div class="row"><div class="check"></div><div class="user"><div class="name">克林</div><div class="meta"><i class="platform bili">B</i>地区未知</div></div><div class="comment">这要搞下来就吃，放久了就面了，请问在哪里买？</div><div class="time">08-23 21:15</div><div class="score"><div class="ring" style="background:conic-gradient(#8394be 0 54%,#263247 54%)"></div><span>低</span></div><div class="tag new">新线索</div><div class="more">•••</div></div>
+            <div class="row"><div class="check"></div><div class="user"><div class="name">大树</div><div class="meta"><i class="platform dy">抖</i>陕西 · 西安</div></div><div class="comment">什么价？有没有团购方案，人数大概二十多个。</div><div class="time">08-23 16:07</div><div class="score"><div class="ring" style="background:conic-gradient(#35d29a 0 91%,#263247 91%)"></div><span>高</span></div><div class="tag hot">高意向</div><div class="more">•••</div></div>
+          </div>
+          <div class="pagination"><div class="bulk"><div class="check"></div>已选择 1 条</div><div class="pages"><div class="page">‹</div><div class="page active">1</div><div class="page">2</div><div class="page">3</div><div class="page">›</div></div></div>
+        </section>
+        <aside class="detail">
+          <div class="detail-head"><strong>线索详情</strong><span>原作 ↗</span></div>
+          <div class="profile"><div class="bigavatar">爱</div><div><div style="font-weight:650">爱笑的眼睛</div><div class="sub">抖音 · 河南郑州 · 首次出现</div></div></div>
+          <div class="scorecard"><div class="scoreline"><b>88 分</b><span>高意向</span></div><div class="bar"><i></i></div><div class="chips"><em>询问价格</em><em>询问配送</em><em>本地客户</em></div></div>
+          <div class="section"><div class="section-title">AI 识别摘要</div><div class="ai">用户明确询问价格及郑州配送范围，购买意向较高。建议先确认需求数量，再使用“价格咨询＋配送说明”模板回复。</div><div class="section-title" style="margin-top:15px">用户轨迹</div><div class="timeline"><div class="event"><b>今天 10:26 · 发现新评论</b>来自任务“暑期招生监控”</div><div class="event"><b>今天 10:27 · 自动完成分析</b>识别为价格咨询，高意向</div><div class="event"><b>等待下一步</b>尚未加入互动中心</div></div></div>
+          <div class="detail-actions"><button>标记无效</button><button>设置提醒</button><button class="primary">加入互动中心</button></div>
+        </aside>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

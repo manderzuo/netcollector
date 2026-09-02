@@ -1,0 +1,71 @@
+# Local runtime state and personal data
+data/
+temp/
+logs/
+output/
+exports/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+*.pid
+*.lock
+device_id.txt
+gui_preferences.json
+
+# Browser profiles, cookies, and local credentials
+.chrome*/
+**/cookie.txt
+**/cookies.txt
+*.session
+*.secret
+*.pem
+
+# Python caches and local environments
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.venv/
+venv/
+env/
+*.py[cod]
+
+# Generated releases, archives, and staging snapshots
+*.zip
+server-staging/
+多平台采集工作台*/
+config/release*/
+config/publish-*/
+config/update.json
+dy-sign-tool/out/
+leadharvest/out/
+ui-current-*.png
+docs/服务器部署信息.md
+docs/线上发布工作记录-*.md
+
+# Temporary reverse-engineering/debug scripts
+dy-sign-tool/_tmp_*.py
+_diag*.py
+_per_task_*.py
+
+# Local demo pages and bundled experiments
+cs-*.html
+ka52-pixel.html
+super-mario.html
+lib/
+
+# Internal handover/audit records that may contain local paths or test identities
+交接文档.md
+docs/QA审计报告-AgentI.md
+docs/开发工作记录-*.md
+docs/最终交付报告-*.md
+docs/第三阶段-*.md
+docs/交接文档-*.md
+docs/线索运营与互动中心-多Agent*.md
+
+# Local editor and tool metadata
+.codex/
+.opencode/
+.idea/
+.vscode/
