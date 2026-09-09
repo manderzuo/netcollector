@@ -886,6 +886,7 @@ ApplicationWindow {
                                     }
                                  }
                              }
+                        }
                              RowLayout {
                             Layout.fillWidth: true; spacing: 12
                             Rectangle {
@@ -1070,7 +1071,6 @@ ApplicationWindow {
                                 }
                             }
                         }
-                    }
                 }
                 Connections {
                     target: backend
