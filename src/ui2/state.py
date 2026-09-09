@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
-"""2.0 界面状态模型（无 Qt 依赖，可单元测试）。"""
+"""V2.1.1 界面状态模型（无 Qt 依赖，可单元测试）。"""
 
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any, Mapping
+
+try:
+    from ..account_reader import looks_like_account_key  # type: ignore
+except ImportError:  # pragma: no cover - direct script/import compatibility
+    from account_reader import looks_like_account_key  # type: ignore
 
 
 PAGE_KEYS = (
@@ -23,11 +29,21 @@ PAGE_LABELS = {
 }
 PLATFORM_LABELS = {
     "douyin": "抖音",
+    "dy": "抖音",
+    "抖音": "抖音",
     "xhs": "小红书",
+    "xiaohongshu": "小红书",
     "bilibili": "B站",
+    "b站": "B站",
     "weibo": "微博",
     "kuaishou": "快手",
+    "ks": "快手",
+    "快手": "快手",
+    "tieba": "百度贴吧",
+    "贴吧": "百度贴吧",
 }
+# 贴吧通过官方 API 工作，不需要 BitBrowser 窗口。
+HIDDEN_PLATFORMS = frozenset()
 STATUS_LABELS = {
     "pending": "待采集",
     "phase_a_search": "搜索采集中",
@@ -48,6 +64,16 @@ STATUS_LABELS = {
     "cooldown": "冷却中",
     "waiting_human": "待人工验证",
     "dead": "不可用",
+    "error": "失败",
+    "exception": "失败",
+    "interrupted": "异常中断",
+    "crashed": "异常中断",
+}
+TASK_STATUS_ALIASES = {
+    "error": "failed",
+    "exception": "failed",
+    "crashed": "failed",
+    "interrupted": "failed",
 }
 INTENT_LABELS = {
     "high": "高",
@@ -234,7 +260,9 @@ class Ui2State:
         }
         logs = list(self.diagnostics.get("logs") or [])
         logs.append(item)
-        self.diagnostics["logs"] = logs[-5000:]
+        # 诊断页的历史日志通过 diagnostics_snapshot 按需读取；常驻界面只保留
+        # 最近一千条，避免长时间采集后每次日志事件都复制几千条对象。
+        self.diagnostics["logs"] = logs[-1000:]
 
     def apply_leads(self, result: Mapping[str, Any] | None) -> None:
         """保存线索查询结果；线索刷新不覆盖任务/账号状态快照。"""
@@ -261,6 +289,8 @@ class Ui2State:
                 continue
             row = dict(raw)
             platform = str(row.get("platform") or "unknown")
+            if platform in HIDDEN_PLATFORMS:
+                continue
             intent = str(row.get("intent_level") or "unknown")
             status = str(row.get("status") or "new")
             row["id"] = int(row.get("id") or 0)
@@ -287,6 +317,8 @@ class Ui2State:
             platform = PLATFORM_LABELS.get(
                 str(raw.get("platform") or ""), str(raw.get("platform") or "未知平台")
             )
+            if str(raw.get("platform") or "") in HIDDEN_PLATFORMS:
+                continue
             keyword = str(raw.get("keyword") or "未命名任务")
             options.append({
                 "id": task_id,
@@ -304,8 +336,12 @@ class Ui2State:
         if not isinstance(result, Mapping):
             raise TypeError("互动查询结果必须是对象")
         current = dict(result)
-        current["items"] = list(current.get("items") or [])
-        current["accounts"] = list(current.get("accounts") or [])
+        current["items"] = [item for item in (current.get("items") or [])
+                             if isinstance(item, Mapping)
+                             and str(item.get("platform") or "").strip().lower() not in HIDDEN_PLATFORMS]
+        current["accounts"] = [item for item in (current.get("accounts") or [])
+                                if isinstance(item, Mapping)
+                                and str(item.get("platform") or "").strip().lower() not in HIDDEN_PLATFORMS]
         current["templates"] = list(current.get("templates") or [])
         current["custom_variables"] = list(current.get("custom_variables") or [])
         current["total"] = int(current.get("total") or 0)
@@ -325,9 +361,13 @@ class Ui2State:
         if not isinstance(result, Mapping):
             raise TypeError("发布中心查询结果必须是对象")
         current = dict(result)
-        current["items"] = list(current.get("items") or [])
+        current["items"] = [item for item in (current.get("items") or [])
+                             if isinstance(item, Mapping)
+                             and str(item.get("platform") or "").strip().lower() not in HIDDEN_PLATFORMS]
         current["status_options"] = list(current.get("status_options") or [])
-        current["platform_options"] = list(current.get("platform_options") or [])
+        current["platform_options"] = [item for item in (current.get("platform_options") or [])
+                                        if not isinstance(item, Mapping)
+                                        or str(item.get("value") or item.get("platform") or "").strip().lower() not in HIDDEN_PLATFORMS]
         current["total"] = int(current.get("total") or 0)
         current["page"] = max(1, int(current.get("page") or 1))
         current["page_size"] = max(1, int(current.get("page_size") or 50))
@@ -390,7 +430,9 @@ class Ui2State:
     def apply_published_messages(self, result: Mapping[str, Any] | None) -> None:
         if not isinstance(result, Mapping):
             raise TypeError("消息结果必须是对象")
-        rows = copy.deepcopy(list(result.get("items") or []))
+        rows = [copy.deepcopy(dict(item)) for item in (result.get("items") or [])
+                if isinstance(item, Mapping)
+                and str(item.get("platform") or "").strip().lower() not in HIDDEN_PLATFORMS]
         self.publishing["messages"] = rows
         self.publishing["message_groups"] = self._group_published_messages(rows)
         self.publishing["message_total"] = int(result.get("total") or 0)
@@ -495,6 +537,8 @@ class Ui2State:
                 continue
             row = dict(raw)
             platform = str(row.get("platform") or row.get("channel") or "unknown")
+            if platform in HIDDEN_PLATFORMS:
+                continue
             status = str(row.get("status") or self.interactions.get("status") or "draft")
             row["draft_id"] = int(row.get("draft_id") or row.get("id") or 0)
             row["platform_label"] = PLATFORM_LABELS.get(platform, platform or "未知平台")
@@ -524,6 +568,8 @@ class Ui2State:
             account = dict(raw)
             account["id"] = int(account.get("id") or 0)
             platform = str(account.get("platform") or "unknown")
+            if platform in HIDDEN_PLATFORMS:
+                continue
             account["platform_label"] = PLATFORM_LABELS.get(platform, platform or "未知平台")
             account["label"] = f"{account.get('platform_label')} · {account.get('name') or '未命名账号'}"
             options.append(account)
@@ -545,6 +591,7 @@ class Ui2State:
         current["log_stats"]["alerts"] = list(current["log_stats"].get("alerts") or [])
         current["bitbrowser"] = dict(current.get("bitbrowser") or {})
         current["llm_api"] = dict(current.get("llm_api") or {})
+        current["tieba_api"] = dict(current.get("tieba_api") or {})
         current["bitbrowser_inspection"] = dict(current.get("bitbrowser_inspection") or {})
         current["live_health"] = dict(current.get("live_health") or {})
         current["export_path"] = str(current.get("export_path") or "")
@@ -575,11 +622,15 @@ class Ui2State:
 
     def diagnostic_health_rows(self) -> list[dict[str, Any]]:
         rows = []
+        seen = set()
         for raw in self.diagnostics.get("health") or []:
             if not isinstance(raw, Mapping):
                 continue
             row = dict(raw)
             platform = str(row.get("platform") or "unknown")
+            if platform in HIDDEN_PLATFORMS:
+                continue
+            seen.add(platform)
             status = str(row.get("status") or "warning")
             row["platform_label"] = PLATFORM_LABELS.get(platform, platform or "未知平台")
             row["status_label"] = {
@@ -587,11 +638,25 @@ class Ui2State:
                 "login_required": "需登录", "failed": "异常",
             }.get(status, status)
             rows.append(row)
+        # 诊断页需要把所有已接入平台补齐；旧数据库或尚未执行过健康检查时，
+        # health_events 可能只有四个平台，界面不能因此少一行。
+        for platform in ("douyin", "xhs", "bilibili", "weibo", "kuaishou"):
+            if platform in seen:
+                continue
+            rows.append({
+                "platform": platform,
+                "platform_label": PLATFORM_LABELS[platform],
+                "status": "warning",
+                "status_label": "未检查",
+                "detail": "尚未执行该平台健康检查",
+                "accounts": 0,
+            })
         return rows
 
     def diagnostic_account_rows(self) -> list[dict[str, Any]]:
         return [dict(item) for item in self.diagnostics.get("accounts") or []
-                if isinstance(item, Mapping)]
+                if isinstance(item, Mapping)
+                and str(item.get("platform") or "").strip().lower() not in HIDDEN_PLATFORMS]
 
     def diagnostic_live_health_rows(self) -> list[dict[str, Any]]:
         """把真实浏览器诊断结果转换成稳定的中文展示字段。"""
@@ -605,6 +670,8 @@ class Ui2State:
                 continue
             row = dict(raw)
             platform = str(row.get("platform") or "unknown")
+            if platform in HIDDEN_PLATFORMS:
+                continue
             status = str(row.get("status") or "warning")
             row["platform_label"] = PLATFORM_LABELS.get(platform, platform or "未知平台")
             row["status_label"] = status_labels.get(status, status)
@@ -631,19 +698,65 @@ class Ui2State:
             if not isinstance(raw, Mapping):
                 continue
             row = dict(raw)
+            if str(row.get("platform") or "").strip().lower() in HIDDEN_PLATFORMS:
+                continue
             row["id"] = int(row.get("id") or key)
+            raw_status = str(row.get("status") or "pending").strip().lower()
+            row["raw_status"] = raw_status
+            row["status"] = TASK_STATUS_ALIASES.get(raw_status, raw_status)
             row["platform_label"] = PLATFORM_LABELS.get(
                 row.get("platform"), row.get("platform") or "未知平台"
             )
             row["keyword"] = str(row.get("keyword") or "未命名任务")
-            row["status"] = str(row.get("status") or "pending")
             row["status_label"] = STATUS_LABELS.get(row["status"], row["status"])
             row["comments"] = int(row.get("comments") or 0)
             row["videos_total"] = int(row.get("videos_total") or 0)
             row["video_done"] = int(row.get("video_done") or 0)
+            row["valid_video_done"] = int(
+                row["valid_video_done"] if "valid_video_done" in row
+                else row.get("video_done") or 0
+            )
+            row["valid_comments"] = int(
+                row["valid_comments"] if "valid_comments" in row
+                else row.get("comments") or 0
+            )
+            row["lead_count"] = int(row.get("lead_count") or 0)
+            run = row.get("latest_run")
+            run = dict(run) if isinstance(run, Mapping) else {}
+            row["latest_run"] = run
+            human_reason = str(
+                row.get("error_reason") or row.get("error_message")
+                or run.get("stop_reason") or ""
+            )
+            if row["status"] == "paused" and (
+                "人工" in human_reason or "验证" in human_reason
+            ):
+                # 后端保留 paused 兼容旧状态机；界面展示更准确的人工验证状态。
+                row["status"] = "waiting_human"
+                row["status_label"] = STATUS_LABELS["waiting_human"]
+            row["start_at"] = str(
+                row.get("start_at") or run.get("started_at") or row.get("created_at") or ""
+            )
+            row["end_at"] = str(
+                row.get("end_at") or run.get("finished_at") or ""
+            )
+            row["error_reason"] = str(
+                row.get("error_reason") or row.get("error_message")
+                or run.get("stop_reason") or ""
+            )
+            account_names = row.get("account_names")
+            if not isinstance(account_names, list):
+                try:
+                    account_names = json.loads(str(row.get("task_accounts") or "[]"))
+                except (TypeError, ValueError):
+                    account_names = []
+            account_names = [str(item).strip() for item in account_names
+                             if str(item).strip()] if isinstance(account_names, list) else []
+            row["account_names"] = account_names
+            row["account_label"] = "、".join(account_names) if account_names else "自动分配"
             target = int(row.get("effective_target_count") or row.get("target_count") or 0)
             row["progress"] = (
-                min(100, round(row["video_done"] * 100 / target))
+                min(100, round(row["valid_video_done"] * 100 / target))
                 if target > 0 else 0
             )
             rows.append(row)
@@ -661,17 +774,49 @@ class Ui2State:
             if not isinstance(raw, Mapping):
                 continue
             row = dict(raw)
+            if str(row.get("platform") or "").strip().lower() in HIDDEN_PLATFORMS:
+                continue
             row["identity"] = str(key)
             row["id"] = int(row.get("id") or 0)
-            row["name"] = str(row.get("name") or key or "未命名账号")
+            raw_name = str(row.get("name") or "").strip()
+            row["account_key"] = raw_name
+            row["window_name"] = raw_name
+            window_id = str(row.get("bb_window_id") or "").strip()
+            has_resolution_flag = "nickname_resolved" in row
+            resolved_flag = bool(row.get("nickname_resolved"))
+            if has_resolution_flag and not resolved_flag:
+                # scheduler.status_report 可能为了兼容旧任务提供了 name，
+                # 但明确标记为未解析时不能把它再次当作昵称。
+                nickname_source = str(
+                    row.get("nick") or row.get("display_name") or ""
+                ).strip()
+            else:
+                nickname_source = str(
+                    row.get("nickname") or row.get("nick") or row.get("display_name") or ""
+                ).strip()
+            if not nickname_source and raw_name and not looks_like_account_key(
+                raw_name, window_id=window_id
+            ):
+                nickname_source = raw_name
+            row["nickname_resolved"] = bool(
+                resolved_flag
+                or (
+                    not has_resolution_flag
+                    and bool(str(row.get("nickname") or row.get("nick") or row.get("display_name") or "").strip())
+                )
+            )
+            row["nickname"] = nickname_source or "未读取昵称"
+            row["name"] = row["nickname"]
             platform = str(row.get("platform") or "")
             row["platform_label"] = PLATFORM_LABELS.get(platform, platform or "未知平台")
             status = str(row.get("status") or "idle")
             row["status"] = status
             row["status_label"] = STATUS_LABELS.get(status, status)
-            window_id = str(row.get("bb_window_id") or "").strip()
             row["window_id"] = window_id
-            row["binding_label"] = "已绑定窗口" if window_id else "未绑定窗口"
+            row["binding_label"] = (
+                "API 采集" if platform == "tieba" else
+                ("已绑定窗口" if window_id else "未绑定窗口")
+            )
             row["cooldown_left_seconds"] = max(
                 0, int(float(row.get("cooldown_left_seconds") or 0))
             )
@@ -692,6 +837,8 @@ class Ui2State:
             "videos": int(totals.get("videos_total") or 0),
             "completed_videos": int(totals.get("videos_done") or 0),
             "comments": int(totals.get("comments") or 0),
+            "leads": int(totals.get("leads") or 0),
+            "interactions": int(totals.get("interactions") or 0),
             "accounts": int(totals.get("accounts") or 0),
             "waiting_human": list(totals.get("waiting_human") or []),
         }
@@ -765,6 +912,7 @@ class Ui2State:
                 "checked_at": self.diagnostics.get("checked_at") or "",
                 "bitbrowser": dict(self.diagnostics.get("bitbrowser") or {}),
                 "llm_api": dict(self.diagnostics.get("llm_api") or {}),
+                "tieba_api": dict(self.diagnostics.get("tieba_api") or {}),
                 "accounts": self.diagnostic_account_rows(),
                 "health": self.diagnostic_health_rows(),
                 "logs": list(self.diagnostics.get("logs") or []),

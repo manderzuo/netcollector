@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""独立的 2.0 QML 界面预览入口。
+"""独立的 2.1.1 QML 界面预览入口。
 
 默认生产入口是 ``src/ui2/default_app.py``，它会同时启动本地后台服务；本文件
 保留为无后台预览入口，方便只验收视觉和交互。未安装 PySide6 时给出明确提示。
@@ -10,26 +10,32 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
+from typing import Any, Mapping
+from urllib.parse import quote, urlsplit, urlunsplit
 
 try:
-    from PySide6.QtCore import QObject, Property, QTimer, QUrl, Signal, Slot
+    from PySide6.QtCore import QCoreApplication, QObject, Property, QTimer, QUrl, Signal, Slot
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
 except ImportError as exc:  # pragma: no cover - 取决于 v2 额外依赖
     raise SystemExit(
-        "2.0 界面需要 PySide6，请先安装 requirements-v2.txt；1.2 旧界面不受影响。"
+        "2.1.1 界面需要 PySide6，请先安装 requirements-v2.txt；旧版入口不受影响。"
     ) from exc
 
 try:
+    from ..app_version import APP_VERSION  # type: ignore
     from .bridge import Ui2Bridge  # type: ignore
     from ..backend_protocol import read_endpoint  # type: ignore
 except ImportError:  # pragma: no cover - python src/ui2/qml_app.py
     HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
+    from app_version import APP_VERSION  # type: ignore
     from ui2.bridge import Ui2Bridge  # type: ignore
     from backend_protocol import read_endpoint  # type: ignore
 
@@ -37,6 +43,33 @@ try:
     from ..time_utils import beijing_now  # type: ignore
 except ImportError:  # pragma: no cover - python src/ui2/qml_app.py
     from time_utils import beijing_now  # type: ignore
+
+try:
+    from ..config_loader import AppConfig  # type: ignore
+except ImportError:  # pragma: no cover - python src/ui2/qml_app.py
+    from config_loader import AppConfig  # type: ignore
+
+try:
+    from ..platform_runtime import open_url  # type: ignore
+except ImportError:  # pragma: no cover - python src/ui2/qml_app.py
+    from platform_runtime import open_url  # type: ignore
+
+try:
+    from ..update_checker import (  # type: ignore
+        DEFAULT_MANIFEST_URL,
+        UpdateCheckError,
+        fetch_manifest,
+        is_update_available,
+        read_local_build_id,
+    )
+except ImportError:  # pragma: no cover - python src/ui2/qml_app.py
+    from update_checker import (  # type: ignore
+        DEFAULT_MANIFEST_URL,
+        UpdateCheckError,
+        fetch_manifest,
+        is_update_available,
+        read_local_build_id,
+    )
 
 
 class QmlBridge(QObject):
@@ -50,6 +83,8 @@ class QmlBridge(QObject):
     adminChanged = Signal()
     logsChanged = Signal()
     beijingNowTextChanged = Signal()
+    updateChanged = Signal()
+    updateEvent = Signal(object)
     # 让 QML 在耗时命令期间立即锁定危险按钮，并在失败时恢复。
     commandFinished = Signal(str, bool, str)
 
@@ -58,12 +93,29 @@ class QmlBridge(QObject):
         self._bridge = bridge
         self._keyword_groups: list[dict] = []
         self._view: dict = bridge.state.to_view_model()
+        # 状态快照由后台 reader 线程接收，Qt 信号会在主线程排队处理。
+        # 长任务期间如果后台更新速度超过 QML 重绘速度，逐条排队会让
+        # 事件队列越来越长，表现为窗口卡住但后台仍在运行。只保留最新
+        # 一份快照，并让 Qt 队列中最多存在一个待处理的刷新信号。
+        self._view_signal_lock = threading.Lock()
+        self._view_signal_pending = False
+        self._pending_view: dict | None = None
+        self._last_published_message_args: dict[str, Any] = {
+            "page": 1, "platform": "", "account_id": "0",
+            "unread_only": False, "message_type": "",
+        }
         self._auth: dict = {
             "authenticated": False,
             "user": None,
             "message": "",
             "users": [],
         }
+        auth_config = AppConfig().auth()
+        self._auth_server_url = str(auth_config.get("server_url") or "").strip()
+        try:
+            self._auth_server_timeout = max(3, min(30, int(auth_config.get("timeout") or 8)))
+        except (TypeError, ValueError):
+            self._auth_server_timeout = 8
         self._sync: dict = {
             "enabled": False, "server_url": "", "device_name": "",
             "api_token_configured": False, "last_sync_at": None,
@@ -72,6 +124,17 @@ class QmlBridge(QObject):
         self._admin: dict = {
             "summary": {}, "employees": [], "devices": [], "backups": [],
             "audit": {"items": [], "total": 0, "counts": {}},
+        }
+        self._update_status: dict = {
+            "checking": False,
+            "updating": False,
+            "available": False,
+            "current_version": APP_VERSION,
+            "current_build_id": read_local_build_id(self._project_root()),
+            "latest_version": "",
+            "latest_build_id": "",
+            "notes": "",
+            "message": "尚未检查更新",
         }
         # 定时发布的可选项和按钮状态需要随着北京时间推进而更新；只发送
         # 一个轻量信号，不触发后台快照或整页刷新。
@@ -86,24 +149,101 @@ class QmlBridge(QObject):
         self.backendEvent.connect(self._apply_view)
         self.backendLogEvent.connect(self._apply_log)
         self.authEvent.connect(self._apply_auth_event)
+        self.updateEvent.connect(self._apply_update_status)
+
+    @staticmethod
+    def _project_root() -> str:
+        # PyInstaller 运行时的 __file__ 可能位于临时解包目录；可写数据、
+        # 更新器和免安装包资源都必须相对实际 EXE 所在目录解析。
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(os.path.abspath(sys.executable))
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def _auth_session_path(self) -> str:
+        """记住登录状态的文件位置；内容只含会话令牌，不含密码。"""
+        return os.path.join(self._project_root(), "data", "auth_session.json")
+
+    def _clear_auth_session(self) -> None:
+        path = self._auth_session_path()
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    def _save_auth_session(self, result: Mapping[str, Any] | None) -> None:
+        payload = dict(result or {})
+        local_token = str(payload.get("local_session_token") or "").strip()
+        remote_token = str(payload.get("remote_session_token") or "").strip()
+        if not local_token and not remote_token:
+            return
+        path = self._auth_session_path()
+        directory = os.path.dirname(path)
+        temporary = path + ".tmp"
+        try:
+            os.makedirs(directory, exist_ok=True)
+            with open(temporary, "w", encoding="utf-8") as stream:
+                json.dump({
+                    "local_session_token": local_token,
+                    "remote_session_token": remote_token,
+                    "auth_server_url": str(payload.get("auth_server_url") or self._auth_server_url).strip(),
+                }, stream, ensure_ascii=False)
+            os.replace(temporary, path)
+        except (OSError, TypeError, ValueError):
+            try:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+            except OSError:
+                pass
+
+    def _load_auth_session(self) -> dict[str, str]:
+        try:
+            with open(self._auth_session_path(), encoding="utf-8") as stream:
+                value = json.load(stream)
+            if not isinstance(value, Mapping):
+                return {}
+            return {
+                "local_session_token": str(value.get("local_session_token") or "").strip(),
+                "remote_session_token": str(value.get("remote_session_token") or "").strip(),
+                "auth_server_url": str(value.get("auth_server_url") or self._auth_server_url).strip(),
+            }
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return {}
 
     def _on_view(self, view: dict) -> None:
         # BackendClient 的 reader 线程只发信号；实际属性更新回到 Qt 线程。
-        self.backendEvent.emit(view)
+        # 快照到达过快时覆盖旧值，避免 Qt 事件队列堆积。
+        with self._view_signal_lock:
+            self._pending_view = dict(view or {})
+            if self._view_signal_pending:
+                return
+            self._view_signal_pending = True
+        self.backendEvent.emit(None)
 
     def _on_log(self, payload: dict) -> None:
         self.backendLogEvent.emit(payload)
 
     @Slot(object)
     def _apply_view(self, view: dict) -> None:
-        self._view = dict(view or {})
+        with self._view_signal_lock:
+            pending = self._pending_view
+            self._pending_view = None
+            self._view_signal_pending = False
+        # 保留直接调用 _apply_view(dict) 的兼容性（旧版自动化/预览入口），
+        # 正常后台事件则使用锁内拿到的最新快照。
+        self._view = dict(pending if pending is not None else (view or {}))
         self.viewChanged.emit()
-        self.logsChanged.emit()
 
     @Slot(object)
     def _apply_log(self, _payload: dict) -> None:
         # 日志只更新日志列表，不触发整棵页面重新布局，避免后台采集时界面抖动。
+        self._bridge.mark_log_signal_delivered()
         self.logsChanged.emit()
+
+    @Slot(object)
+    def _apply_update_status(self, payload: dict) -> None:
+        self._update_status.update(dict(payload or {}))
+        self.updateChanged.emit()
 
     @Slot(object)
     def _apply_auth_event(self, event: dict) -> None:
@@ -111,6 +251,9 @@ class QmlBridge(QObject):
         kind = str(event.get("kind") or "")
         if kind == "login":
             user = dict(event.get("user") or {})
+            session = event.get("session")
+            if bool(event.get("remember")) and isinstance(session, Mapping):
+                self._save_auth_session(session)
             self._bridge.set_auth_scope(user)
             self._keyword_groups = []
             self.keywordGroupsChanged.emit()
@@ -129,10 +272,25 @@ class QmlBridge(QObject):
                 self.refreshAdminDashboard()
             return
         if kind == "logout":
+            self._clear_auth_session()
             self._bridge.set_auth_scope(None)
             self._keyword_groups = []
             self.keywordGroupsChanged.emit()
             self._auth.update({"authenticated": False, "user": None, "message": ""})
+            self.authChanged.emit()
+            return
+        if kind == "restore_error":
+            self._clear_auth_session()
+            self._bridge.set_auth_scope(None)
+            self._auth.update({
+                "authenticated": False, "user": None,
+                "message": str(event.get("message") or "登录状态已失效，请重新登录"),
+            })
+            self.authChanged.emit()
+            return
+        if kind == "error":
+            self._auth["message"] = str(event.get("message") or "操作失败")
+            self.authChanged.emit()
             self._auth["users"] = []
             self._sync = {"enabled": False, "server_url": "", "device_name": "",
                           "api_token_configured": False, "last_sync_at": None,
@@ -151,9 +309,6 @@ class QmlBridge(QObject):
             self._auth["users"] = list(event.get("users") or [])
             self.authChanged.emit()
             return
-        if kind == "error":
-            self._auth["message"] = str(event.get("message") or "操作失败")
-            self.authChanged.emit()
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
@@ -366,7 +521,8 @@ class QmlBridge(QObject):
 
     @Property("QVariant", notify=viewChanged)
     def diagnosticHealthRows(self):
-        return list((self._view.get("diagnostics") or {}).get("health") or [])
+        # 统一走状态模型，补齐旧库缺失的平台并提供中文平台/状态标签。
+        return list(self._bridge.state.diagnostic_health_rows())
 
     @Property("QVariant", notify=viewChanged)
     def diagnosticAccountRows(self):
@@ -389,6 +545,10 @@ class QmlBridge(QObject):
         return dict((self._view.get("diagnostics") or {}).get("llm_api") or {})
 
     @Property("QVariant", notify=viewChanged)
+    def diagnosticTiebaApi(self):
+        return dict((self._view.get("diagnostics") or {}).get("tieba_api") or {})
+
+    @Property("QVariant", notify=viewChanged)
     def diagnosticBitBrowserChecks(self):
         return list(((self._view.get("diagnostics") or {}).get("bitbrowser_inspection") or {}).get("checks") or [])
 
@@ -407,6 +567,12 @@ class QmlBridge(QObject):
     @Property(str, notify=viewChanged)
     def diagnosticCheckedAt(self) -> str:
         return str((self._view.get("diagnostics") or {}).get("checked_at") or "")
+
+    @Property("QVariant", notify=updateChanged)
+    def updateStatus(self):
+        """当前更新检查状态；只包含版本和发布说明，不包含本地数据。"""
+
+        return dict(self._update_status)
 
     @Property("QVariant", notify=syncChanged)
     def syncStatus(self):
@@ -440,17 +606,50 @@ class QmlBridge(QObject):
     def authUsers(self):
         return list(self._auth.get("users") or [])
 
+    @Property(str, notify=authChanged)
+    def authServerUrl(self) -> str:
+        return self._auth_server_url
+
     @Slot(str, str)
-    def loginUser(self, username: str, password: str) -> None:
+    @Slot(str, str, bool)
+    def loginUser(self, username: str, password: str, remember: bool = False) -> None:
+        remember = bool(remember)
+        if not remember:
+            # 用户取消勾选时立即撤销本地自动登录入口，避免程序在登录请求
+            # 期间意外退出后仍自动恢复旧账号。
+            self._clear_auth_session()
         self._auth["message"] = "正在登录…"
         self.authChanged.emit()
         self._bridge.command_async(
-            "auth_login", {"username": str(username or ""), "password": str(password or "")},
+            "auth_login", {
+                "username": str(username or ""), "password": str(password or ""),
+                "auth_server_url": self._auth_server_url,
+                "auth_server_timeout": self._auth_server_timeout,
+            },
             on_success=lambda result: self.authEvent.emit({
-                "kind": "login", "user": (result or {}).get("user")
+                "kind": "login", "user": (result or {}).get("user"),
+                "session": result or {}, "remember": remember,
             }),
             on_error=lambda exc: self.authEvent.emit({
                 "kind": "error", "message": self._error_message(exc)
+            }),
+        )
+
+    @Slot()
+    def restoreAuthSession(self) -> None:
+        session = self._load_auth_session()
+        if not session.get("local_session_token") and not session.get("remote_session_token"):
+            return
+        args = dict(session)
+        args["device_id"] = ""
+        self._bridge.command_async(
+            "auth_restore", args,
+            on_success=lambda result: self.authEvent.emit({
+                "kind": "login", "user": (result or {}).get("user"),
+                "session": result or {}, "remember": True,
+            }),
+            on_error=lambda exc: self.authEvent.emit({
+                "kind": "restore_error", "message": self._error_message(exc),
             }),
         )
 
@@ -461,7 +660,9 @@ class QmlBridge(QObject):
         self._bridge.command_async(
             "auth_register",
             {"username": str(username or ""), "password": str(password or ""),
-             "employee_name": str(employee_name or "")},
+             "employee_name": str(employee_name or ""),
+             "auth_server_url": self._auth_server_url,
+             "auth_server_timeout": self._auth_server_timeout},
             on_success=lambda _result: self.authEvent.emit({"kind": "register"}),
             on_error=lambda exc: self.authEvent.emit({
                 "kind": "error", "message": self._error_message(exc)
@@ -470,6 +671,7 @@ class QmlBridge(QObject):
 
     @Slot()
     def logoutUser(self) -> None:
+        self._clear_auth_session()
         self._bridge.command_async(
             "auth_logout", {},
             on_success=lambda _result: self.authEvent.emit({"kind": "logout"}),
@@ -650,10 +852,51 @@ class QmlBridge(QObject):
 
     @Slot(str, str, str)
     def addAccount(self, name: str, platform: str, window_id: str = "") -> None:
-        self._run_command_async(
-            "add_account",
-            {"name": str(name or "").strip(), "platform": str(platform or "douyin"),
-             "bb_window_id": str(window_id or "").strip() or None},
+        """保存账号后自动读取一次平台昵称；失败不回滚账号记录。"""
+        args = {
+            "name": str(name or "").strip(),
+            "platform": str(platform or "douyin"),
+            "bb_window_id": str(window_id or "").strip() or None,
+        }
+
+        def on_added(result):
+            self._bridge.refresh_async()
+            account_id = int((result or {}).get("account_id") or 0)
+            self.commandFinished.emit(
+                "add_account", True,
+                "账号已保存，正在读取平台昵称…" if account_id > 0 else "账号已保存",
+            )
+            if account_id <= 0:
+                return
+            # 贴吧通过官方 API 令牌采集，不依赖 BitBrowser 窗口，也不需要走浏览器昵称绑定。
+            if str(args.get("platform") or "") == "tieba":
+                self._bridge.refresh_async()
+                self.commandFinished.emit("add_account", True, "贴吧账号已保存；请在设置中配置 TB_TOKEN")
+                return
+
+            def on_bound(_bound):
+                self._bridge.refresh_async()
+                self.commandFinished.emit("bind_account", True, "已读取平台昵称")
+
+            def on_bind_error(exc):
+                # 账号已经保存，读取昵称失败只提示原因，不把“保存账号”误报为失败。
+                self._on_command_error(exc)
+                self.commandFinished.emit(
+                    "bind_account", False,
+                    f"账号已保存，但昵称读取失败：{self._error_message(exc)}",
+                )
+
+            self._bridge.command_async(
+                "bind_account", {"account_id": account_id}, timeout=60.0,
+                on_success=on_bound, on_error=on_bind_error,
+            )
+
+        def on_add_error(exc):
+            self._on_command_error(exc)
+            self.commandFinished.emit("add_account", False, self._error_message(exc))
+
+        self._bridge.command_async(
+            "add_account", args, on_success=on_added, on_error=on_add_error,
         )
 
     @Slot(int)
@@ -681,7 +924,35 @@ class QmlBridge(QObject):
 
     @Slot(int)
     def bindAccount(self, account_id: int) -> None:
-        self._run_command_async("bind_account", {"account_id": int(account_id)})
+        # 读取账号主页通常需要导航和等待 SPA 渲染，不能使用普通命令的 10 秒超时。
+        self._run_command_async(
+            "bind_account", {"account_id": int(account_id)}, timeout=60.0
+        )
+
+    @Slot()
+    def refreshAccountNicknames(self) -> None:
+        """只刷新空闲账号的昵称，运行中的账号由后台主动跳过。"""
+        def on_success(result):
+            self._bridge.refresh_async()
+            payload = result if isinstance(result, dict) else {}
+            updated = len(payload.get("updated") or [])
+            skipped = len(payload.get("skipped") or [])
+            failed = len(payload.get("failed") or [])
+            self.commandFinished.emit(
+                "refresh_account_nicknames", True,
+                f"昵称刷新完成：成功 {updated} 个，跳过 {skipped} 个，失败 {failed} 个",
+            )
+
+        def on_error(exc):
+            self._on_command_error(exc)
+            self.commandFinished.emit(
+                "refresh_account_nicknames", False, self._error_message(exc)
+            )
+
+        self._bridge.command_async(
+            "refresh_account_nicknames", {}, timeout=240.0,
+            on_success=on_success, on_error=on_error,
+        )
 
     @Slot()
     def refresh(self) -> None:
@@ -796,6 +1067,44 @@ class QmlBridge(QObject):
     @Slot("QVariant")
     def addLeadsToPrivateMessage(self, lead_ids) -> None:
         self._add_leads_to_interaction_command(lead_ids, "add_leads_to_private_message")
+
+    @Slot(int, str)
+    def switchInteractionType(self, lead_id: int, interaction_type: str) -> None:
+        """为同一线索创建另一种互动草稿，成功后由 QML 切换页签。"""
+        try:
+            normalized_type = str(interaction_type or "").strip().lower()
+            if normalized_type not in {"comment_reply", "private_message"}:
+                raise ValueError("不支持的互动类型")
+            normalized_lead_id = int(lead_id)
+            if normalized_lead_id <= 0:
+                raise ValueError("线索编号无效")
+        except (TypeError, ValueError) as exc:
+            self._on_command_error(exc)
+            self.commandFinished.emit(
+                "interaction_type_switch", False,
+                f"error:{int(lead_id or 0)}:{self._error_message(exc)}",
+            )
+            return
+
+        def on_success(_result):
+            self.commandFinished.emit(
+                "interaction_type_switch", True,
+                f"{normalized_type}:{normalized_lead_id}",
+            )
+
+        def on_error(exc):
+            self._on_command_error(exc)
+            self.commandFinished.emit(
+                "interaction_type_switch", False,
+                f"error:{normalized_lead_id}:{self._error_message(exc)}",
+            )
+
+        self._bridge.command_async(
+            "add_leads_to_interaction",
+            {"lead_ids": [normalized_lead_id], "interaction_type": normalized_type},
+            on_success=on_success,
+            on_error=on_error,
+        )
 
     def _add_leads_to_interaction_command(self, lead_ids, command: str) -> None:
         try:
@@ -918,18 +1227,68 @@ class QmlBridge(QObject):
 
     @Slot(str, str, "QVariant")
     def saveTemplate(self, template_id: str, content: str, custom_variables) -> None:
+        value = custom_variables
+        to_variant = getattr(value, "toVariant", None)
+        if callable(to_variant):
+            value = to_variant()
+        try:
+            raw_items = list(value or [])
+        except TypeError:
+            self._on_command_error(ValueError("模板变量列表无效"))
+            self.commandFinished.emit("save_template", False, "模板变量列表无效")
+            return
         variables = {}
-        for item in list(custom_variables or []):
-            if isinstance(item, dict):
+        for item in raw_items:
+            item_to_variant = getattr(item, "toVariant", None)
+            if callable(item_to_variant):
+                item = item_to_variant()
+            if isinstance(item, Mapping):
                 name = str(item.get("name") or "").strip()
                 if name:
                     variables[name] = str(item.get("value") or "")
+
+        def on_success(_result):
+            self._bridge.refresh_interactions_async()
+            self.commandFinished.emit(
+                "save_template", True,
+                f"模板“{str(template_id or '').strip()}”已保存，可继续编辑或关闭",
+            )
+
+        def on_error(exc):
+            self._on_command_error(exc)
+            self.commandFinished.emit("save_template", False, self._error_message(exc))
+
         self._bridge.command_async(
             "save_template",
             {"template_id": str(template_id or ""), "content": str(content or ""),
              "custom_variables": variables},
-            on_success=lambda _result: self._bridge.refresh_interactions_async(),
-            on_error=self._on_command_error,
+            on_success=on_success,
+            on_error=on_error,
+        )
+
+    @Slot(int)
+    def openPublishedMessageReply(self, message_id: int) -> None:
+        """打开消息对应的 BitBrowser 页面，仅导航，不自动回复或发送。"""
+        message_id = int(message_id or 0)
+        if message_id <= 0:
+            self.commandFinished.emit("open_published_message_browser", False, "消息编号无效")
+            return
+
+        def on_success(result):
+            self.commandFinished.emit(
+                "open_published_message_browser", True,
+                str((result or {}).get("message") or "已打开对应浏览器回复页面"),
+            )
+
+        def on_error(exc):
+            self._on_command_error(exc)
+            self.commandFinished.emit(
+                "open_published_message_browser", False, self._error_message(exc),
+            )
+
+        self._bridge.command_async(
+            "open_published_message_browser", {"message_id": message_id},
+            timeout=45.0, on_success=on_success, on_error=on_error,
         )
 
     @Slot(int, str, str, str, str)
@@ -1144,12 +1503,25 @@ class QmlBridge(QObject):
 
     @Slot(str, str, str)
     def generateContent(self, keyword: str, platform: str = "", source_ref: str = "") -> None:
+        def on_success(result):
+            self.refreshGeneratedContents()
+            source_type = str((result or {}).get("source_type") or "")
+            if source_type == "llm":
+                message = "智能 API 已调用并生成内容"
+            else:
+                message = "智能 API 未返回有效内容，已使用本地模板"
+            self.commandFinished.emit("generate_content", True, message)
+
+        def on_error(exc):
+            self._on_command_error(exc)
+            self.commandFinished.emit("generate_content", False, self._error_message(exc))
+
         self._bridge.command_async(
             "generate_content", {"keyword": str(keyword or ""),
                                   "platform": str(platform or ""),
                                   "source_ref": str(source_ref or "")},
-            on_success=lambda _result: self.refreshGeneratedContents(),
-            on_error=self._on_command_error,
+            on_success=on_success,
+            on_error=on_error,
         )
 
     @Slot(int)
@@ -1160,19 +1532,66 @@ class QmlBridge(QObject):
             on_error=self._on_command_error,
         )
 
-    @Slot(int, str, int, str, str, str, str)
+    @Slot(int)
+    def deleteGeneratedContent(self, generated_id: int) -> None:
+        def on_success(_result):
+            self.refreshGeneratedContents()
+            self.commandFinished.emit("delete_generated_content", True, "生成内容已删除")
+
+        def on_error(exc):
+            self._on_command_error(exc)
+            self.commandFinished.emit(
+                "delete_generated_content", False, self._error_message(exc)
+            )
+
+        self._bridge.command_async(
+            "delete_generated_content", {"generated_id": int(generated_id)},
+            on_success=on_success, on_error=on_error,
+        )
+
+    @Slot(int, str, int, str, str, str, str, bool)
     def schedulePublish(self, draft_id: int, platform: str, account_id: int,
                         scheduled_at: str, editor_title: str,
-                        editor_body: str, editor_topics: str) -> None:
+                        editor_body: str, editor_topics: str,
+                        real_send_authorized: bool = False) -> None:
+        def on_success(result):
+            self.refreshPublishDrafts()
+            job_id = int((result or {}).get("job_id") or 0)
+            when = str((result or {}).get("scheduled_at") or scheduled_at or "")
+            match = re.search(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})", when)
+            display_when = (
+                f"{match.group(1)}年{match.group(2)}月{match.group(3)}日 "
+                f"{match.group(4)}:{match.group(5)}"
+                if match else when.replace("T", " ")
+            )
+            if bool((result or {}).get("real_send_authorized")):
+                message = (
+                    f"定时发布已保存：任务#{job_id} · 北京时间 {display_when}；"
+                    "到点自动打开账号浏览器执行发布"
+                )
+            else:
+                message = (
+                    f"定时发布已保存：任务#{job_id} · 北京时间 {display_when}；"
+                    "未开启真实发布，到点不会点击最终发布按钮"
+                )
+            self.commandFinished.emit("schedule_publish", True, message)
+
+        def on_error(exc):
+            self._on_command_error(exc)
+            self.commandFinished.emit(
+                "schedule_publish", False, self._error_message(exc)
+            )
+
         self._bridge.command_async(
             "schedule_publish", {"draft_id": int(draft_id), "platform": str(platform or ""),
                                   "account_id": int(account_id),
                                   "scheduled_at": str(scheduled_at or ""),
                                   "editor_title": str(editor_title or ""),
                                   "editor_body": str(editor_body or ""),
-                                  "editor_topics": str(editor_topics or "")},
-            on_success=lambda _result: self.refreshPublishDrafts(),
-            on_error=self._on_command_error,
+                                  "editor_topics": str(editor_topics or ""),
+                                  "real_send_authorized": bool(real_send_authorized)},
+            on_success=on_success,
+            on_error=on_error,
         )
 
     @Slot(int, str, str, bool, str)
@@ -1184,6 +1603,13 @@ class QmlBridge(QObject):
                 "message_type": str(message_type or "")}
         if str(account_id or "").strip() and str(account_id) != "0":
             args["account_id"] = int(account_id)
+        self._last_published_message_args = {
+            "page": int(args["page"]),
+            "platform": str(args["platform"]),
+            "account_id": str(account_id or "0"),
+            "unread_only": bool(unread_only),
+            "message_type": str(message_type or ""),
+        }
         self._bridge.command_async(
             "list_published_messages", args,
             on_success=self._apply_published_messages, on_error=self._on_command_error,
@@ -1211,9 +1637,16 @@ class QmlBridge(QObject):
 
     @Slot(int, bool)
     def markPublishedMessage(self, message_id: int, read: bool = True) -> None:
+        filters = dict(getattr(self, "_last_published_message_args", {}) or {})
         self._bridge.command_async(
             "mark_published_message", {"message_id": int(message_id), "read": bool(read)},
-            on_success=lambda _result: self.refreshPublishedMessages(),
+            on_success=lambda _result: self.refreshPublishedMessages(
+                int(filters.get("page") or 1),
+                str(filters.get("platform") or ""),
+                str(filters.get("account_id") or "0"),
+                bool(filters.get("unread_only", False)),
+                str(filters.get("message_type") or ""),
+            ),
             on_error=self._on_command_error,
         )
 
@@ -1261,6 +1694,10 @@ class QmlBridge(QObject):
                 self.commandFinished.emit("send_interactions", True, "发送处理完成")
 
         def on_error(exc):
+            # 客户端超时不代表后台发送已停止；后台可能仍在等待浏览器
+            # 加载或页面确认。立即重读待发送列表，让 sending/failed/sent
+            # 的真实状态覆盖旧行，避免用户再次点击造成重复发送。
+            self._bridge.refresh_interactions_async()
             self._on_command_error(exc)
             self.commandFinished.emit("send_interactions", False, str(exc))
 
@@ -1314,6 +1751,15 @@ class QmlBridge(QObject):
             on_error=self._on_command_error,
         )
 
+    @Slot(str, bool)
+    def saveTiebaSettings(self, token: str, enabled: bool) -> None:
+        self._bridge.command_async(
+            "save_tieba_settings",
+            {"token": str(token or ""), "enabled": bool(enabled)},
+            on_success=lambda _result: self.refreshDiagnostics(),
+            on_error=self._on_command_error,
+        )
+
     @Slot()
     def inspectBitBrowser(self) -> None:
         self._bridge.command_async(
@@ -1340,6 +1786,142 @@ class QmlBridge(QObject):
             on_success=lambda result: self._apply_log_export(result),
             on_error=self._on_command_error,
         )
+
+    @Slot()
+    def checkForUpdates(self) -> None:
+        """在设置页手动检查更新，不阻塞 Qt 界面。"""
+
+        if self._update_status.get("checking") or self._update_status.get("updating"):
+            return
+        root = self._project_root()
+        current_build = read_local_build_id(root)
+        self._update_status.update({
+            "checking": True,
+            "available": False,
+            "current_version": APP_VERSION,
+            "current_build_id": current_build,
+            "latest_version": "",
+            "latest_build_id": "",
+            "notes": "",
+            "message": "正在检查线上版本…",
+        })
+        self.updateChanged.emit()
+
+        def worker() -> None:
+            try:
+                manifest_url = DEFAULT_MANIFEST_URL
+                config_path = os.path.join(root, "config", "update.json")
+                try:
+                    with open(config_path, "r", encoding="utf-8-sig") as stream:
+                        config = json.load(stream)
+                    if isinstance(config, dict) and str(config.get("manifest_url") or "").strip():
+                        manifest_url = str(config["manifest_url"]).strip()
+                except (OSError, ValueError, TypeError):
+                    # 配置损坏时使用官方默认地址，保证“检查更新”仍可用。
+                    pass
+                manifest = fetch_manifest(manifest_url, timeout=15)
+                available, reason = is_update_available(
+                    APP_VERSION, current_build, manifest
+                )
+                if available:
+                    message = f"{reason}：{manifest['version']}"
+                else:
+                    message = reason
+                self.updateEvent.emit({
+                    "checking": False,
+                    "available": bool(available),
+                    "current_version": APP_VERSION,
+                    "current_build_id": current_build,
+                    "latest_version": manifest["version"],
+                    "latest_build_id": manifest.get("build_id", ""),
+                    "download_url": manifest["download_url"],
+                    "sha256": manifest["sha256"],
+                    "notes": manifest.get("notes", ""),
+                    "message": message,
+                })
+            except (UpdateCheckError, OSError, ValueError, TypeError) as exc:
+                self.updateEvent.emit({
+                    "checking": False,
+                    "available": False,
+                    "message": f"检查更新失败：{self._error_message(exc)}",
+                })
+
+        threading.Thread(target=worker, name="ui2-update-check", daemon=True).start()
+
+    @Slot()
+    def installUpdate(self) -> None:
+        """启动独立更新器，等待当前 GUI 退出后替换程序并重启。"""
+
+        if not self._update_status.get("available"):
+            self._update_status["message"] = "当前没有可安装的更新"
+            self.updateChanged.emit()
+            return
+        root = self._project_root()
+        updater_candidates = (
+            os.path.join(root, "update.ps1"),
+            os.path.join(root, "更新程序.ps1"),
+            os.path.join(root, "更新程序", "更新程序.ps1"),
+            os.path.join(root, "updater", "update.ps1"),
+        )
+        script = next((item for item in updater_candidates if os.path.isfile(item)), "")
+        if not script:
+            self._update_status["message"] = (
+                "当前安装包缺少更新程序，请将便携更新器复制到软件目录后重试"
+            )
+            self.updateChanged.emit()
+            return
+        try:
+            powershell = (
+                os.environ.get("SystemRoot", r"C:\\Windows")
+                + r"\System32\WindowsPowerShell\v1.0\powershell.exe"
+            )
+            if not os.path.exists(powershell):
+                powershell = "powershell.exe"
+            update_marker = os.path.join(self._project_root(), ".update_pending")
+            with open(update_marker, "w", encoding="ascii") as stream:
+                stream.write(f"pid={os.getpid()}\n")
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    script,
+                    "-AppRoot",
+                    root,
+                    "-WaitForPid",
+                    str(os.getpid()),
+                    "-Force",
+                    "-Restart",
+                ],
+                cwd=self._project_root(),
+                creationflags=creation_flags,
+                close_fds=True,
+            )
+            self._update_status.update({
+                "updating": True,
+                "available": False,
+                "message": "更新程序已启动，正在关闭并重启软件…",
+            })
+            self.updateChanged.emit()
+            QTimer.singleShot(500, self._quit_application_for_update)
+        except (OSError, ValueError) as exc:
+            try:
+                marker = os.path.join(self._project_root(), ".update_pending")
+                if os.path.exists(marker):
+                    os.remove(marker)
+            except OSError:
+                pass
+            self._update_status["message"] = f"启动更新失败：{self._error_message(exc)}"
+            self.updateChanged.emit()
+
+    @staticmethod
+    def _quit_application_for_update() -> None:
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _apply_diagnostics(self, result) -> None:
         try:
@@ -1445,31 +2027,37 @@ class QmlBridge(QObject):
              "enabled": bool(enabled), "search_sort": str(search_sort or "") or None},
         )
 
+    @staticmethod
+    def _source_text_fragment(url: str, text: str) -> str:
+        """用 Chrome 原生 text-fragment 让原作页尽量直接滚到评论正文。"""
+        target = str(url or "").strip()
+        anchor = " ".join(str(text or "").split()).strip()
+        if not anchor:
+            return target
+        # 评论正文很长时取前 80 个字符，避免超长 URL 触发浏览器限制；
+        # 平台的图片/表情评论没有正文时，调用方传入昵称作为兜底锚点。
+        anchor = anchor[:80]
+        parts = urlsplit(target)
+        fragment = parts.fragment
+        directive = ":~:text=" + quote(anchor, safe="")
+        fragment = (fragment + "&" if fragment else "") + directive
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, fragment))
+
     @Slot(str)
-    def openSourceUrl(self, url: str) -> None:
+    @Slot(str, str)
+    def openSourceUrl(self, url: str, comment_text: str = "") -> None:
         target = str(url or "").strip()
         if not target or not (target.startswith("http://") or target.startswith("https://")):
             self._on_command_error(ValueError("原作地址无效"))
             return
-        # 线索中心的“点击查看”明确走 Chrome；找不到固定路径时再交给系统默认浏览器。
-        candidates = [
-            os.path.join(os.environ.get("PROGRAMFILES", ""), "Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
-        ]
-        chrome = next((path for path in candidates if path and os.path.exists(path)), "")
+        target = self._source_text_fragment(target, comment_text)
         try:
-            if chrome:
-                subprocess.Popen([chrome, target], close_fds=True)
-            elif hasattr(os, "startfile"):
-                os.startfile(target)
-            else:  # pragma: no cover
-                import webbrowser
-                webbrowser.open(target)
+            open_url(target, prefer_chrome=True)
         except Exception as exc:
             self._on_command_error(exc)
 
-    def _run_command_async(self, command: str, args: dict) -> None:
+    def _run_command_async(self, command: str, args: dict,
+                           timeout: float | None = None) -> None:
         """后台命令不占用 Qt 事件循环，完成后拉取一份最新快照。"""
         def on_success(result):
             self._bridge.refresh_async()
@@ -1482,6 +2070,7 @@ class QmlBridge(QObject):
         self._bridge.command_async(
             command,
             args,
+            timeout=timeout,
             on_success=on_success,
             on_error=on_error,
         )
@@ -1495,7 +2084,7 @@ class QmlBridge(QObject):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="多平台采集工作台 2.0 QML 界面")
+    parser = argparse.ArgumentParser(description=f"多平台采集工作台 {APP_VERSION} QML 界面")
     parser.add_argument("--endpoint", default="", help="后台服务地址 JSON 文件")
     args = parser.parse_args(argv)
 
@@ -1516,7 +2105,8 @@ def main(argv: list[str] | None = None) -> int:
     engine.load(QUrl.fromLocalFile(qml_path))
     if not engine.rootObjects():
         return 2
-    client_bridge.connect_async()
+    engine.rootObjects()[0].setProperty("appVersion", APP_VERSION)
+    client_bridge.connect_async(lambda _view: qml_bridge.restoreAuthSession())
     exit_code = app.exec()
     client_bridge.close()
     return int(exit_code)

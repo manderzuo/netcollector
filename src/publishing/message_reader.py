@@ -77,6 +77,31 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _normalize_message_user_id(platform: str, value: Any) -> str:
+    """把页面链接形式的用户字段还原成真正的用户 ID。
+
+    小红书通知页的用户头像链接经常被直接写进 ``user_id``，其中会带
+    ``/user/profile/``、查询参数，甚至包含一次性的 ``xsec_token``。消息
+    中心只需要稳定的用户 ID，不能把整条链接展示或持久化。
+    """
+    text = _clean_text(value)
+    if not text:
+        return ""
+    if str(platform or "").strip().lower() != "xhs":
+        return text
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        parsed = None
+    path = parsed.path if parsed is not None else text
+    match = re.search(r"/user/profile/([^/?#]+)", path or text, flags=re.IGNORECASE)
+    if match:
+        return _clean_text(match.group(1))
+    # 兼容已经是相对路径但没有开头斜杠的旧页面结果。
+    match = re.search(r"(?:^|user/profile/)([^/?#]+)", text, flags=re.IGNORECASE)
+    return _clean_text(match.group(1)) if match else text
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -166,7 +191,9 @@ def normalize_messages(platform: str, account_id: int, raw_items: Any,
             "message_id": message_id,
             "message_type": kind,
             "message_type_label": MESSAGE_TYPE_LABELS[kind],
-            "user_id": _clean_text(raw.get("user_id") or raw.get("uid")),
+            "user_id": _normalize_message_user_id(
+                platform, raw.get("user_id") or raw.get("uid")
+            ),
             "nickname": _clean_text(raw.get("nickname") or raw.get("user_name") or "匿名用户"),
             "content": content,
             # 时间原文（如“昨天”“4天前”）写入 extra；created_at 用于排序，

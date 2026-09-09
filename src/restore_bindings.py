@@ -64,7 +64,7 @@ def open_and_read(bb, wid, plat, name):
             loop.close()
         except Exception:
             pass
-        acc = account_reader.read_account(plat, ws)
+        acc = account_reader.read_account(plat, ws, expected_uid=name)
         return acc
     except Exception as e:
         return {"error": str(e)[:80]}

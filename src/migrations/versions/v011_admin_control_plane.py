@@ -21,7 +21,7 @@ def upgrade_011(conn):
           user_id INTEGER NOT NULL,
           device_id TEXT NOT NULL,
           device_name TEXT NOT NULL DEFAULT '',
-          client_version TEXT NOT NULL DEFAULT '2.0',
+          client_version TEXT NOT NULL DEFAULT '2.1.1',
           status TEXT NOT NULL DEFAULT 'active',
           first_seen_at TEXT NOT NULL,
           last_seen_at TEXT NOT NULL,
@@ -36,4 +36,3 @@ def upgrade_011(conn):
           ON employee_devices(status, last_seen_at DESC);
         """
     )
-

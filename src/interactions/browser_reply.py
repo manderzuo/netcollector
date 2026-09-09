@@ -103,7 +103,9 @@ class BitBrowserReplyAdapter(BrowserReplyAdapter):
             trace.emit("browser_open_failed", reason="missing_cdp_websocket")
             raise BrowserReplyError("BitBrowser 未返回 CDP WebSocket 地址")
 
-        session = CdpSession(ws_url)
+        # 浏览器刚启动时首个 CDP 命令可能明显慢于常规页面操作，
+        # 把默认命令窗口提高到 45 秒，具体脚本仍使用各自的更长超时。
+        session = CdpSession(ws_url, timeout=45.0)
         trace.emit("cdp_connect_started", websocket_available=True)
         try:
             await session.connect()
@@ -143,7 +145,12 @@ class BitBrowserReplyAdapter(BrowserReplyAdapter):
                     seconds=min(self._settle_seconds, 1.0),
                     reason="target_page_already_loaded",
                 )
-            page_state = await session.eval(_page_state_script(), sid)
+            # BitBrowser 打开窗口后，Page.navigate 已返回并不代表目标页
+            # 已经完成路由切换。慢机器上这里若只采样一次，会把仍在加载的
+            # 正确作品误判成“目标页面不匹配”。
+            page_state = await _wait_for_target_page_state(
+                session, sid, target.video_url, trace=trace,
+            )
             trace.emit("page_state_checked", session_id=sid, page_state=page_state)
             if (isinstance(page_state, dict)
                     and _same_url(page_state.get("url"), target.video_url)
@@ -411,10 +418,26 @@ class BitBrowserReplyAdapter(BrowserReplyAdapter):
             await asyncio.sleep(0.8)
             trace.emit("post_submit_settle_completed", seconds=0.8)
             trace.emit("verify_script_started", session_id=sid)
-            verified = await session.eval(
-                _verify_script(content, target.platform), sid
-            )
-            trace.emit("verify_script_result", result=verified)
+            # 平台点击发送后，评论列表和输入框经常异步刷新。给结果一段
+            # 独立的确认窗口，避免页面慢时把已经发出的评论误记成失败。
+            verify_deadline = asyncio.get_running_loop().time() + 12.0
+            verified = None
+            verify_attempt = 0
+            while True:
+                verify_attempt += 1
+                verified = await session.eval(
+                    _verify_script(content, target.platform), sid, timeout=20.0,
+                )
+                trace.emit(
+                    "verify_script_result",
+                    attempt=verify_attempt,
+                    result=verified,
+                )
+                if isinstance(verified, dict) and verified.get("ok"):
+                    break
+                if asyncio.get_running_loop().time() >= verify_deadline:
+                    break
+                await asyncio.sleep(0.5)
             verified_ok = bool(isinstance(verified, dict) and verified.get("ok"))
             return ReplyActionResult(
                 ok=verified_ok,
@@ -431,8 +454,10 @@ class BitBrowserReplyAdapter(BrowserReplyAdapter):
                 await session.close()
                 trace.emit("cdp_session_closed")
             except Exception as exc:
+                # 回复结果已经返回后，CDP 关闭异常不能覆盖“已发送”状态；
+                # 记录即可，避免后台把一次成功发送改写成失败。
                 trace.exception("cdp_session_close_failed", exc)
-                raise
+                pass
 
 
 def _result_payload(result: ReplyActionResult) -> dict:
@@ -534,9 +559,51 @@ async def _bring_target_page_to_front(session, sid: str, target_url: str,
         await asyncio.sleep(0.2)
 
 
+async def _wait_for_target_page_state(session, sid: str, target_url: str,
+                                      *, trace: Optional[DebugTrace] = None,
+                                      timeout: float = 15.0) -> dict:
+    """等待导航真正切换到目标作品页，再开始评论定位。"""
+    deadline = asyncio.get_running_loop().time() + max(1.0, float(timeout))
+    attempt = 0
+    last = {}
+    while True:
+        attempt += 1
+        try:
+            last = await session.eval(_page_state_script(), sid, timeout=15.0)
+        except Exception as exc:
+            if trace:
+                trace.exception("target_page_state_probe_failed", exc,
+                                attempt=attempt)
+            last = {}
+        route_ok = isinstance(last, dict) and _same_url(
+            last.get("url"), target_url
+        )
+        visible = bool(
+            isinstance(last, dict)
+            and not last.get("hidden")
+            and last.get("visibility") == "visible"
+        )
+        if trace:
+            trace.emit(
+                "target_page_state_probe",
+                attempt=attempt,
+                route_ok=route_ok,
+                visible=visible,
+                page_state=last,
+            )
+        if route_ok and (visible or not isinstance(last, dict)):
+            return last
+        if route_ok and isinstance(last, dict):
+            # 页面 URL 已到位但标签暂时隐藏，交给后续 bringToFront 流程处理。
+            return last
+        if asyncio.get_running_loop().time() >= deadline:
+            return last if isinstance(last, dict) else {}
+        await asyncio.sleep(0.35)
+
+
 async def _wait_for_target_match(session, target: ReplyTarget, sid: str,
                                  *, trace: Optional[DebugTrace] = None,
-                                 timeout: float = 8.0):
+                                 timeout: float = 20.0):
     """等待平台评论组件挂载，避免动态评论尚未出现就开始定位。"""
     platform = _platform_key(target.platform)
     # 微博评论列表是懒加载的，首屏命中前需要给分段滚动和网络回填留出时间。

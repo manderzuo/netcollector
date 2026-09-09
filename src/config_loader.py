@@ -26,6 +26,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "model": "",
         "timeout": 30,
     },
+    "tieba_api": {
+        # 贴吧 skill 使用官方 API 令牌，不依赖 BitBrowser 窗口。
+        "enabled": False,
+        "token": "",
+        "timeout": 30,
+    },
     "lead_rules": {
         "henan_confidence_threshold": 65,
         "hot_days": 3,
@@ -39,6 +45,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 浏览器填充/发送仍需显式配置；默认关闭，避免升级后触发外部操作。
         "browser_reply_enabled": False,
         "require_human_review": True,
+        # 批量评论回复和私信共用节流规则：默认每条间隔 5 秒，
+        # 连续处理 10 条后再额外冷却 1 分钟。
+        "batch_reply_cooldown_seconds": 5.0,
+        "batch_reply_long_cooldown_seconds": 60.0,
+        "batch_reply_long_cooldown_every": 10,
     },
     "sync": {
         "enabled": False,
@@ -46,6 +57,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "api_token": "",
         "device_name": "",
         "timeout": 20,
+    },
+    "auth": {
+        # 统一账号服务只承载注册、登录和审批，不接收浏览器 Cookie 或业务数据。
+        "server_url": "https://www.gemstory.cn",
+        "timeout": 8,
     },
 }
 
@@ -119,9 +135,17 @@ class AppConfig:
     def llm_api(self) -> dict:
         return self._data.get("llm_api", {})
 
+    def tieba_api(self) -> dict:
+        """百度贴吧 skill 配置；令牌只用于 tieba.baidu.com。"""
+        return self._data.get("tieba_api", {})
+
     def sync(self) -> dict:
         """员工数据同步配置；默认关闭，只有手动点击同步才会联网。"""
         return self._data.get("sync", {})
+
+    def auth(self) -> dict:
+        """统一账号服务配置；认证页面使用，业务数据仍保存在本机。"""
+        return self._data.get("auth", {})
 
     def update_section(self, section: str, values: dict) -> None:
         """更新一个配置分区并落盘；不会把配置内容写入日志。"""

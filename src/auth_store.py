@@ -14,8 +14,8 @@ import os
 import secrets
 import sqlite3
 import threading
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timedelta
+from typing import Any, Mapping
 
 
 class AuthError(RuntimeError):
@@ -35,6 +35,7 @@ class AuthStore:
     MAX_USERNAME_LENGTH = 64
     MAX_PASSWORD_LENGTH = 256
     MAX_EMPLOYEE_NAME_LENGTH = 80
+    SESSION_TTL_DAYS = 180
 
     def __init__(self, db_path: str):
         self.db_path = os.path.abspath(db_path)
@@ -69,6 +70,22 @@ class AuthStore:
                       approved_at TEXT,
                       last_login_at TEXT,
                       updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                # 登录保持只保存不可逆的会话令牌摘要，不保存密码。会话表
+                # 与业务数据同库，代码升级时会被保留，启动后可重新建立
+                # 当前用户的数据读取范围。
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS app_sessions (
+                      token_hash TEXT PRIMARY KEY,
+                      user_id INTEGER NOT NULL,
+                      created_at TEXT NOT NULL,
+                      last_seen_at TEXT NOT NULL,
+                      expires_at TEXT NOT NULL,
+                      revoked_at TEXT,
+                      FOREIGN KEY(user_id) REFERENCES app_users(id)
                     )
                     """
                 )
@@ -233,11 +250,170 @@ class AuthStore:
         finally:
             conn.close()
 
+    @staticmethod
+    def _session_hash(token: Any) -> str:
+        value = str(token or "").strip()
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def create_session(self, user_id: int) -> str:
+        """创建持久登录会话，返回只给客户端保存的原始令牌。"""
+        user_id = int(user_id)
+        token = secrets.token_urlsafe(48)
+        now = datetime.now().astimezone()
+        expires = now + timedelta(days=self.SESSION_TTL_DAYS)
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO app_sessions "
+                "(token_hash, user_id, created_at, last_seen_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (self._session_hash(token), user_id,
+                 now.isoformat(timespec="seconds"),
+                 now.isoformat(timespec="seconds"),
+                 expires.isoformat(timespec="seconds")),
+            )
+            conn.commit()
+            return token
+        finally:
+            conn.close()
+
+    def get_session_user(self, token: Any) -> dict[str, Any] | None:
+        """校验会话并返回当前审批状态的用户；失效会话不会恢复登录。"""
+        raw = str(token or "").strip()
+        if len(raw) < 24:
+            return None
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT s.*, u.* FROM app_sessions s "
+                "JOIN app_users u ON u.id = s.user_id "
+                "WHERE s.token_hash = ? AND s.revoked_at IS NULL",
+                (self._session_hash(raw),),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                expires = datetime.fromisoformat(str(row["expires_at"]))
+                current = datetime.now().astimezone()
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=current.tzinfo)
+                if expires <= current:
+                    conn.execute(
+                        "UPDATE app_sessions SET revoked_at = ? WHERE token_hash = ?",
+                        (current.isoformat(timespec="seconds"), self._session_hash(raw)),
+                    )
+                    conn.commit()
+                    return None
+            except (TypeError, ValueError):
+                return None
+            if str(row["status"] or "") != "approved":
+                return None
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            conn.execute(
+                "UPDATE app_sessions SET last_seen_at = ? WHERE token_hash = ?",
+                (now, self._session_hash(raw)),
+            )
+            conn.commit()
+            return self._public_user(row)
+        finally:
+            conn.close()
+
+    def revoke_session(self, token: Any) -> None:
+        raw = str(token or "").strip()
+        if not raw:
+            return
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE app_sessions SET revoked_at = ? "
+                "WHERE token_hash = ? AND revoked_at IS NULL",
+                (self._now(), self._session_hash(raw)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def get(self, user_id: int) -> dict[str, Any] | None:
         conn = self._connect()
         try:
             row = conn.execute("SELECT * FROM app_users WHERE id = ?", (int(user_id),)).fetchone()
             return self._public_user(row) if row else None
+        finally:
+            conn.close()
+
+    def get_by_username(self, username: Any) -> dict[str, Any] | None:
+        """按账号读取本机镜像用户。远程认证成功后用它绑定本地数据归属。"""
+        username = self._text(username, "账号", self.MAX_USERNAME_LENGTH)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM app_users WHERE username = ?", (username,)
+            ).fetchone()
+            return self._public_user(row) if row else None
+        finally:
+            conn.close()
+
+    def ensure_external_user(self, user: Mapping[str, Any], password: Any = None) -> dict[str, Any]:
+        """把统一账号服务返回的用户镜像到本机，保留本机数据归属 ID。
+
+        远程账号 ID 不能直接当作每台电脑 SQLite 的 owner_user_id：不同电脑
+        可能已有同号的历史本地账号。这里按用户名更新/创建本机镜像，避免
+        新员工登录后误读旧员工数据，同时让已有本地数据继续归属于原账号。
+        """
+        if not isinstance(user, Mapping):
+            raise AuthError("invalid_user", "统一账号服务返回的用户信息无效")
+        username = self._text(user.get("username"), "账号", self.MAX_USERNAME_LENGTH)
+        employee_name = self._text(
+            user.get("employee_name"), "员工姓名", self.MAX_EMPLOYEE_NAME_LENGTH,
+            required=False,
+        )
+        role = str(user.get("role") or "employee").strip().lower()
+        status = str(user.get("status") or "pending").strip().lower()
+        if role not in {"admin", "employee"}:
+            role = "employee"
+        if status not in {"pending", "approved", "rejected", "disabled"}:
+            status = "pending"
+        encoded_password = self.hash_password(
+            self._password(password) if password is not None else secrets.token_urlsafe(32)
+        )
+        approved_at = str(user.get("approved_at") or "") or None
+        now = self._now()
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM app_users WHERE username = ?", (username,)
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO app_users
+                      (username, password_hash, employee_name, role, status,
+                       created_at, approved_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (username, encoded_password, employee_name, role, status,
+                     str(user.get("created_at") or now), approved_at, now),
+                )
+            else:
+                # 本机 admin 是保留账号；远程服务不能把它降级为员工。
+                if str(row["username"]).casefold() == "admin":
+                    role = "admin"
+                    status = "approved"
+                conn.execute(
+                    """
+                    UPDATE app_users
+                       SET password_hash = ?, employee_name = ?, role = ?, status = ?,
+                           approved_at = ?, updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (encoded_password, employee_name, role, status, approved_at, now,
+                     int(row["id"])),
+                )
+            conn.commit()
+            current = conn.execute(
+                "SELECT * FROM app_users WHERE username = ?", (username,)
+            ).fetchone()
+            return self._public_user(current)
         finally:
             conn.close()
 

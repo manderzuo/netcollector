@@ -88,6 +88,20 @@ class LLMApiClient:
     """提供智能 API 的只读连通性检测。"""
 
     @staticmethod
+    def is_configured(config: dict, *, require_key: bool = True) -> bool:
+        """判断发布/分析功能是否具备完整的连接配置。
+
+        连通性检测允许无密钥的本地兼容服务，但发布工作区的“智能 API
+        已启用”状态必须和实际调用条件一致；否则界面会显示已启用，调用
+        时却只能无鉴权请求并静默回退本地模板。
+        """
+        config = config if isinstance(config, dict) else {}
+        base_url = str(config.get("base_url") or "").strip()
+        model = str(config.get("model") or "").strip()
+        api_key = str(config.get("api_key") or "").strip()
+        return bool(base_url and model and (api_key or not require_key))
+
+    @staticmethod
     def _thinking_payload(config: dict) -> dict:
         """按服务商/模型选择关闭或分离思维链的兼容参数。"""
         config = config if isinstance(config, dict) else {}
@@ -727,7 +741,7 @@ class LLMApiClient:
         if not keyword:
             return {"healthy": False, "status": "invalid", "detail": "生成关键词不能为空"}
         platform_labels = {
-            "douyin": "抖音", "xhs": "小红书", "bilibili": "B站", "weibo": "微博", "kuaishou": "快手",
+            "douyin": "抖音", "xhs": "小红书", "bilibili": "B站", "weibo": "微博", "kuaishou": "快手", "tieba": "百度贴吧",
         }
         platform = str(platform or "").strip().lower()
         platform_label = platform_labels.get(platform, "五个平台") if platform else "五个平台"

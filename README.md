@@ -1,21 +1,21 @@
-# 多账号采集平台（抖音 / 小红书）
+# 多平台采集工作台 V2.1.2
 
 一个通过 **比特浏览器（BitBrowser）** 管理多账号、采集抖音/小红书视频与评论、做意向分析的桌面工具（Python + tkinter，零第三方依赖）。
 
 ## 快速开始
 
 ```bash
-# 1. 启动 2.0 GUI（真实采集模式，连 BitBrowser）
+# 1. 启动 V2.1.2 GUI（真实采集模式，连 BitBrowser）
 cd D:\gpt\douyinxiaohongshu
 python src\ui2\default_app.py
 
-# 2. 若只演示 2.0 界面流程（不连 BitBrowser）
+# 2. 若只演示 V2.1.2 界面流程（不连 BitBrowser）
 python src\ui2\default_app.py --demo
 
 # 3. 旧版 Tk GUI（回退排查入口）
 python src\gui.py
 
-# 4. 2.0 独立后台服务（仅后台调试；不要与 GUI 同时管理同一数据库）
+# 4. V2.1.2 独立后台服务（仅后台调试；不要与 GUI 同时管理同一数据库）
 python src\backend_app.py
 ```
 
@@ -27,6 +27,8 @@ pip install websockets
 
 > 运行前确认：BitBrowser 本地 API 服务已开启（默认 http://127.0.0.1:54345），并已有至少一个账号 profile 窗口。
 
+首次注册的员工申请会提交到统一账号服务 `https://www.gemstory.cn`，管理员在个人中心的用户审批中处理；员工本机的账号绑定、浏览器登录态、采集数据和 LLM 配置不会因为注册或升级被覆盖。若统一服务暂时不可用，已有本地账号仍可按本地模式登录。
+
 ## 使用流程（三步）
 
 见《交接文档.md》第 3 章「使用方法」。
@@ -35,11 +37,11 @@ pip install websockets
 
 | 路径 | 说明 |
 |---|---|
-| `src\ui2\default_app.py` | 2.0 默认桌面入口（QML 界面 + 本地后台服务） |
-| `src\ui2\qml\main.qml` | 2.0 QML 工作台界面 |
+| `src\ui2\default_app.py` | V2.1.2 默认桌面入口（QML 界面 + 本地后台服务） |
+| `src\ui2\qml\main.qml` | V2.1.2 QML 工作台界面 |
 | `src\gui.py` | 旧版 Tk 回退入口（账号管理/任务管理/数据导出） |
 | `src\scheduler.py` | 任务调度器（状态机/均分/冷却/断点/人工接管） |
-| `src\backend_app.py` | 2.0 独立后台服务启动入口（本机回环接口） |
+| `src\backend_app.py` | V2.1.2 独立后台服务启动入口（本机回环接口） |
 | `src\db.py` | SQLite 数据层 |
 | `src\bitbrowser.py` | BitBrowser 本地 API 客户端封装 |
 | `src\cdp.py` | Chrome DevTools Protocol 客户端 |

@@ -15,6 +15,7 @@ PLATFORMS = {
     "weibo": ("微博", "weibo_chrome"),
     "bilibili": ("B站", "bilibili_adapter"),
     "kuaishou": ("快手", "kuaishou_collect"),
+    "tieba": ("百度贴吧", "tieba_adapter"),
 }
 
 
@@ -51,6 +52,9 @@ class PlatformHealthChecker:
             if not adapter_ok:
                 status = HealthStatus.FAILED
                 detail = adapter_detail
+            elif platform == "tieba":
+                status = HealthStatus.WARNING
+                detail = "贴吧 API 适配器正常；请在设置中配置 TB_TOKEN 后进行真实接口检测"
             elif not bound_count:
                 status = HealthStatus.WARNING
                 detail = "采集适配器正常，但尚未绑定可用浏览器账号"
@@ -64,7 +68,8 @@ class PlatformHealthChecker:
             store.record(
                 platform, "基础健康检查", status, detail,
                 metadata={"adapter_module": module_name, "adapter_ready": adapter_ok,
-                          "reply_adapter_ready": reply_ok, "bound_account_count": bound_count},
+                          "reply_adapter_ready": reply_ok, "bound_account_count": bound_count,
+                          "api_platform": platform == "tieba"},
             )
             rows.append({
                 "platform": platform, "platform_label": label, "status": status,

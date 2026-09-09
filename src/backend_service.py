@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""2.0 本地后台任务服务兼容层。
+"""2.1.1 本地后台任务服务兼容层。
 
 本模块不改变现有 GUI 的启动方式。它把已有 ``Scheduler`` 包装成一个仅
 监听本机回环地址的 JSON Lines 服务，先用于集成测试，后续由 Tk/QML GUI
@@ -13,6 +13,7 @@ import csv
 import json
 import os
 import re
+from pathlib import Path
 import secrets
 import sqlite3
 import socketserver
@@ -20,8 +21,15 @@ import threading
 import time
 from datetime import datetime
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 try:
+    from .platform_runtime import open_path  # type: ignore
+except ImportError:  # pragma: no cover - 直接以 src 为模块根目录
+    from platform_runtime import open_path  # type: ignore
+
+try:
+    from .app_version import APP_VERSION  # type: ignore
     from .backend_protocol import (
         BackendEndpoint,
         ProtocolError,
@@ -35,6 +43,7 @@ try:
         write_endpoint,
     )
 except ImportError:  # pragma: no cover - 支持 python src/backend_service.py
+    from app_version import APP_VERSION  # type: ignore
     from backend_protocol import (  # type: ignore
         BackendEndpoint,
         ProtocolError,
@@ -55,10 +64,64 @@ class _BackendTCPServer(socketserver.ThreadingTCPServer):
 
 
 _AUTH_COMMANDS = frozenset({
-    "auth_register", "auth_login", "auth_logout", "auth_me",
+    "auth_register", "auth_login", "auth_restore", "auth_logout", "auth_me",
     "auth_list_users", "auth_approve_user", "auth_reject_user",
     "auth_disable_user", "auth_reset_password",
 })
+
+# 贴吧通过官方 API 工作，不需要 BitBrowser 窗口。
+_HIDDEN_PLATFORMS = frozenset()
+
+
+def _bring_process_window_to_front(pid: Any) -> bool:
+    """尽量把 BitBrowser 窗口带到前台，避免打开成功但用户看不到。"""
+    if os.name != "nt":
+        return False
+    try:
+        process_id = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        hwnd_holder = {"value": 0}
+        enum_proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        @enum_proc_type
+        def enum_windows(hwnd, _lparam):
+            window_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
+            if int(window_pid.value) == process_id and user32.IsWindowVisible(hwnd):
+                hwnd_holder["value"] = int(hwnd)
+                return False
+            return True
+
+        user32.EnumWindows(enum_windows, 0)
+        hwnd = hwnd_holder["value"]
+        if not hwnd:
+            return False
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def _focus_opened_browser(browser: Any, opened: Mapping[str, Any], window_id: str) -> bool:
+    """使用打开接口返回的 PID；旧版接口无 PID 时再查询一次。"""
+    pid = opened.get("pid") or opened.get("processId") or opened.get("process_id")
+    if not pid and browser is not None and window_id:
+        try:
+            pids = browser.pids(window_id)
+            if isinstance(pids, Mapping):
+                pid = pids.get(window_id) or pids.get(str(window_id))
+        except Exception:
+            pid = None
+    return _bring_process_window_to_front(pid)
 
 
 class _BackendClientHandler(socketserver.StreamRequestHandler):
@@ -69,6 +132,9 @@ class _BackendClientHandler(socketserver.StreamRequestHandler):
         self._write_lock = threading.Lock()
         self._closed = False
         self.auth_user: dict[str, Any] | None = None
+        self.local_session_token = ""
+        self.remote_auth_client: Any | None = None
+        self.remote_auth_token = ""
         # 一个本地后台服务对应一台工作终端；编号由服务端持久化，重启 GUI
         # 或重连 TCP 后仍保持一致。不使用电脑名、用户名或浏览器窗口 ID。
         self.device_id = str(getattr(self.service, "device_id", "") or secrets.token_hex(16))
@@ -160,6 +226,8 @@ class BackendService:
         self._server_thread: threading.Thread | None = None
         self._watcher_thread: threading.Thread | None = None
         self._hourly_log_thread: threading.Thread | None = None
+        self._scheduled_publish_thread: threading.Thread | None = None
+        self._scheduled_publish_wakeup = threading.Event()
         self._stop = threading.Event()
         self._device_id_path = os.path.join(
             os.path.dirname(os.path.abspath(self.scheduler.db_path)),
@@ -175,6 +243,11 @@ class BackendService:
         # 线索查询和互动草稿写入使用独立 SQLite 连接，但仍串行化这两类
         # 操作，避免多个 QML 请求同时触发迁移、提交或状态推进。
         self._lead_lock = threading.RLock()
+        # 真实回复会在这里等待浏览器加载和页面确认，不能把全局线索锁
+        # 占满整个浏览器流程；同一草稿仍需单独串行，防止慢页面期间重复
+        # 点击触发两次平台发送。
+        self._interaction_send_locks: dict[int, threading.Lock] = {}
+        self._interaction_send_locks_guard = threading.Lock()
         # 账号主页同步会导航对应 BitBrowser 窗口；同一账号同时导航两次会
         # 让两个 CDP 会话互相覆盖页面，最终把 B 站推荐页/微博入口页当成
         # 账号主页。每个账号只允许一个同步请求进入浏览器。
@@ -286,6 +359,10 @@ class BackendService:
             self.scheduler.start_monitoring()
         except Exception as exc:
             self._on_scheduler_log(f"[monitor] 后台监控启动失败：{type(exc).__name__}: {exc}")
+        # 定时发布与采集监控是两条独立链路。服务启动时恢复发布队列，
+        # 这样 GUI 重启或关闭后，只要后台服务仍在运行，预约任务仍会在
+        # 北京时间到点执行；线程只领取已明确开启真实发布授权的任务。
+        self._start_scheduled_publish_runner()
         # 重启后先复核数据库里残留的人工冻结；复核在后台执行，不阻塞服务监听。
         reconcile = getattr(self.scheduler, "reconcile_human_waiting_async", None)
         if callable(reconcile):
@@ -297,6 +374,7 @@ class BackendService:
         if server is None:
             return
         self._stop.set()
+        self._scheduled_publish_wakeup.set()
         try:
             self.scheduler.stop_monitoring()
         except Exception:
@@ -330,10 +408,14 @@ class BackendService:
             self._watcher_thread.join(timeout=2)
         if self._hourly_log_thread is not None and self._hourly_log_thread is not threading.current_thread():
             self._hourly_log_thread.join(timeout=2)
+        if self._scheduled_publish_thread is not None and self._scheduled_publish_thread is not threading.current_thread():
+            self._scheduled_publish_thread.join(timeout=3)
         self._server = None
         self._server_thread = None
         self._watcher_thread = None
         self._hourly_log_thread = None
+        self._scheduled_publish_thread = None
+        self._scheduled_publish_wakeup.clear()
         if self.endpoint_path:
             try:
                 with open(self.endpoint_path, encoding="utf-8") as stream:
@@ -342,6 +424,152 @@ class BackendService:
                     os.remove(self.endpoint_path)
             except (OSError, ValueError, AttributeError):
                 pass
+
+    def _start_scheduled_publish_runner(self) -> None:
+        """启动唯一的定时发布轮询线程。"""
+        thread = self._scheduled_publish_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._scheduled_publish_wakeup.clear()
+        self._scheduled_publish_thread = threading.Thread(
+            target=self._scheduled_publish_loop,
+            name="scheduled-publish-runner",
+            daemon=True,
+        )
+        self._scheduled_publish_thread.start()
+
+    def _scheduled_publish_loop(self) -> None:
+        # 轮询粒度为 1 秒，保证“两个小时后”的任务不会因长轮询明显延迟；
+        # wakeup 让服务停止可以立即退出，不阻塞 GUI 关闭。
+        while not self._stop.is_set():
+            try:
+                self.run_scheduled_publish_once()
+            except Exception as exc:
+                self._on_scheduler_log(
+                    f"定时发布后台轮询异常：{type(exc).__name__}: {exc}"
+                )
+            self._scheduled_publish_wakeup.wait(1.0)
+            self._scheduled_publish_wakeup.clear()
+
+    def _claim_scheduled_publish_job(self) -> dict[str, Any] | None:
+        try:
+            from .publishing.service import PublishingService  # type: ignore
+        except ImportError:  # pragma: no cover
+            from publishing.service import PublishingService  # type: ignore
+        with self._lead_lock:
+            conn = self._lead_connection()
+            try:
+                return PublishingService(conn).claim_due_scheduled_job()
+            finally:
+                conn.close()
+
+    def _update_scheduled_publish_job(self, job_id: int, *, published: bool,
+                                       error_code: str = "",
+                                       error_message: str = "") -> None:
+        try:
+            from .publishing.service import PublishingService  # type: ignore
+        except ImportError:  # pragma: no cover
+            from publishing.service import PublishingService  # type: ignore
+        with self._lead_lock:
+            conn = self._lead_connection()
+            try:
+                PublishingService(conn).finish_publish_job(
+                    int(job_id), published=published,
+                    error_code=error_code, error_message=error_message,
+                )
+            finally:
+                conn.close()
+
+    def _record_scheduled_publish_attempt(self, job: Mapping[str, Any], *,
+                                          result: Mapping[str, Any] | None = None,
+                                          error_code: str = "",
+                                          error_message: str = "") -> None:
+        """将定时发布执行结果写入已有审计表，便于定位到点后的页面问题。"""
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        payload = dict(result or {})
+        # 结果中可能包含较大的页面诊断对象；审计记录只保留可序列化摘要，
+        # 正文不写入日志，避免扩大日志和泄露发布内容。
+        payload = {
+            "published": bool(payload.get("published")),
+            "send_clicked": bool(payload.get("send_clicked")),
+            "message": str(payload.get("message") or "")[:500],
+        }
+        with self._lead_lock:
+            conn = self._lead_connection()
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO publish_attempts "
+                        "(job_id, run_id, step, page_url, selector, result, "
+                        "error_code, error_message, started_at, finished_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (int(job.get("id") or 0), str(job.get("run_id") or ""),
+                         "scheduled_publish", "", "", json.dumps(payload, ensure_ascii=False),
+                         str(error_code or "") or None,
+                         str(error_message or "")[:1000] or None, now, now),
+                    )
+            finally:
+                conn.close()
+
+    def _execute_scheduled_publish_job(self, job: Mapping[str, Any]) -> None:
+        job_id = int(job.get("id") or 0)
+        draft_id = int(job.get("draft_id") or 0)
+        account_id = int(job.get("account_id") or 0)
+        platform = str(job.get("platform") or "").strip().lower()
+        account_name = str(job.get("account_name") or account_id)
+        self._on_scheduler_log(
+            f"定时发布到点执行：任务#{job_id} · 草稿#{draft_id} · "
+            f"{self._platform_label(platform)} · 账号 {account_name}"
+        )
+        try:
+            result = self._real_publish_draft({
+                "draft_id": draft_id,
+                "account_id": account_id,
+                "platform": platform,
+                "confirm_real_publish": True,
+            })
+            if bool(result.get("published")):
+                self._update_scheduled_publish_job(job_id, published=True)
+                self._record_scheduled_publish_attempt(job, result=result)
+                self._on_scheduler_log(
+                    f"定时发布完成：任务#{job_id} · 草稿#{draft_id} · "
+                    f"{self._platform_label(platform)} · 账号 {account_name}"
+                )
+                return
+            result_data = result.get("result") if isinstance(result, Mapping) else {}
+            message = str(
+                (result_data or {}).get("message") or "页面未确认最终发布"
+            )
+            self._update_scheduled_publish_job(
+                job_id, published=False, error_code="publish_not_confirmed",
+                error_message=message,
+            )
+            self._record_scheduled_publish_attempt(
+                job, result=result, error_code="publish_not_confirmed",
+                error_message=message,
+            )
+            self._on_scheduler_log(f"定时发布未确认：任务#{job_id} · {message}")
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self._update_scheduled_publish_job(
+                job_id, published=False, error_code="scheduled_publish_failed",
+                error_message=message,
+            )
+            self._record_scheduled_publish_attempt(
+                job, error_code="scheduled_publish_failed", error_message=message,
+            )
+            self._on_scheduler_log(f"定时发布失败：任务#{job_id} · {message}")
+
+    def run_scheduled_publish_once(self) -> int:
+        """执行一轮到期定时发布；同时供冒烟测试使用。"""
+        processed = 0
+        while not self._stop.is_set():
+            job = self._claim_scheduled_publish_job()
+            if not job:
+                break
+            processed += 1
+            self._execute_scheduled_publish_job(job)
+        return processed
 
     def _register_client(self, client: _BackendClientHandler) -> None:
         with self._clients_lock:
@@ -413,6 +641,27 @@ class BackendService:
             return value
 
         return scrub(dict(args))
+
+    @staticmethod
+    def _remote_auth_client(args: Mapping[str, Any]):
+        """按登录/注册请求创建统一账号服务客户端。
+
+        统一账号服务地址只由认证页面显式传入；没有传入时继续使用本机
+        认证，保证离线旧数据和自动化测试不被网络请求干扰。
+        """
+        server_url = str(args.get("auth_server_url") or "").strip()
+        if not server_url:
+            return None
+        try:
+            from .remote_auth import RemoteAuthClient  # type: ignore
+        except ImportError:  # pragma: no cover
+            from remote_auth import RemoteAuthClient  # type: ignore
+        timeout = args.get("auth_server_timeout") or 8
+        return RemoteAuthClient(server_url, timeout=float(timeout))
+
+    def _localize_remote_user(self, remote_user: Mapping[str, Any], password: Any = None) -> dict[str, Any]:
+        """将统一账号服务用户映射为本机 owner ID，避免跨电脑 ID 碰撞。"""
+        return self._auth_store.ensure_external_user(remote_user, password=password)
 
     def _watch_state(self) -> None:
         while not self._stop.is_set():
@@ -558,6 +807,16 @@ class BackendService:
         except ImportError:  # pragma: no cover
             import db  # type: ignore
         return db.init_db(self.scheduler.db_path, check_same_thread=False)
+
+    def _interaction_send_lock(self, draft_id: int) -> threading.Lock:
+        """返回同一互动草稿的发送锁，避免重复点击并阻塞其他查询。"""
+        draft_id = int(draft_id)
+        with self._interaction_send_locks_guard:
+            lock = self._interaction_send_locks.get(draft_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._interaction_send_locks[draft_id] = lock
+            return lock
 
     @staticmethod
     def _lead_row(item) -> dict[str, Any]:
@@ -807,6 +1066,7 @@ class BackendService:
             "bilibili": "https://www.bilibili.com/",
             "weibo": "https://weibo.com/",
             "kuaishou": "https://www.kuaishou.com/new-reco",
+            "tieba": "https://tieba.baidu.com/",
         }.get(str(platform or "douyin"), "https://www.douyin.com/")
 
     def _account_by_id(self, account_id: int) -> dict[str, Any]:
@@ -845,6 +1105,8 @@ class BackendService:
             raise RuntimeError("BitBrowser 客户端未配置")
 
         platform = str(account.get("platform") or "douyin")
+        if platform == "tieba":
+            raise RuntimeError("百度贴吧使用 API 令牌，不需要打开 BitBrowser 窗口")
         page_url = self._platform_url(platform)
         result = bb.open_browser(window_id, ignore_default_urls=True)
         if not isinstance(result, dict):
@@ -880,6 +1142,8 @@ class BackendService:
         except Exception as exc:
             self._on_scheduler_log(f"账号 {account.get('name') or account_id} 已打开，但平台导航失败：{exc}")
 
+        _focus_opened_browser(bb, result, window_id)
+
         path = self._account_ws_path(platform)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as stream:
@@ -890,6 +1154,8 @@ class BackendService:
     def _create_browser_window(self, args: Mapping[str, Any]) -> dict[str, Any]:
         """创建并打开一个 BitBrowser profile，供账号页随后选择绑定。"""
         raw_platform = str(args.get("platform") or "douyin").strip().lower()
+        if raw_platform in _HIDDEN_PLATFORMS:
+            raise ValueError("该平台暂未启用")
         platform = {
             "dy": "douyin", "douyin": "douyin",
             "xhs": "xhs", "xiaohongshu": "xhs", "redbook": "xhs",
@@ -899,6 +1165,8 @@ class BackendService:
         }.get(raw_platform)
         if not platform:
             raise ValueError(f"不支持的平台：{raw_platform}")
+        if platform == "tieba":
+            raise ValueError("百度贴吧使用 API 令牌，不需要创建 BitBrowser 窗口")
 
         browser = getattr(self.scheduler, "bb", None)
         if browser is None:
@@ -1042,7 +1310,7 @@ class BackendService:
 
         # 删除与该窗口关联的旧 CDP 地址，防止下次打开账号时复用失效连接。
         cache_removed = []
-        for platform in ("douyin", "xhs", "bilibili", "weibo", "kuaishou"):
+        for platform in ("douyin", "xhs", "bilibili", "weibo", "kuaishou", "tieba"):
             try:
                 path = self._account_ws_path(platform)
                 with open(path, encoding="utf-8") as stream:
@@ -1072,6 +1340,14 @@ class BackendService:
         account_id = self._int_arg(args, "account_id")
         account = self._account_by_id(account_id)
         platform = str(account.get("platform") or "douyin")
+        if platform == "tieba":
+            return {
+                "account_id": account_id,
+                "name": str(account.get("name") or ""),
+                "nickname": str(account.get("nickname") or account.get("name") or ""),
+                "platform": platform,
+                "window_id": "",
+            }
         window_id = str(account.get("bb_window_id") or "").strip()
         if not window_id:
             raise RuntimeError("该账号尚未绑定 BitBrowser 窗口，无法读取登录账号")
@@ -1091,36 +1367,116 @@ class BackendService:
 
         try:
             try:
-                from .account_reader import read_account  # type: ignore
+                from .account_reader import read_account, _normalise_expected_uid  # type: ignore
             except ImportError:  # pragma: no cover
-                from account_reader import read_account  # type: ignore
-            info = read_account(platform, ws) or {}
+                from account_reader import read_account, _normalise_expected_uid  # type: ignore
+            # 读取时优先使用已经确认的平台 UID。旧库没有该字段时，兼容
+            # 以前写入 name 的纯数字 UID；窗口名/内部账号名不能作为归属依据。
+            expected_uid_raw = str(
+                account.get("platform_user_id")
+                or account.get("name")
+                or ""
+            ).strip()
+            expected_uid = _normalise_expected_uid(platform, expected_uid_raw)
+            # 读取器自身负责兼容旧版账号名并提取可识别的平台 UID；保留
+            # 原始值传入，兼容旧适配器/测试桩，同时用 normalized UID 做校验。
+            info = read_account(platform, ws, expected_uid=expected_uid_raw) or {}
         except Exception as exc:
             raise RuntimeError(f"读取平台账号失败：{exc}") from exc
         if not info.get("logged_in"):
             raise RuntimeError("该窗口未登录或暂时无法读取账号信息")
-        nickname = str(info.get("nick") or info.get("uid") or info.get("sec_uid") or "").strip()
+        nickname = str(
+            info.get("nickname") or info.get("nick") or info.get("display_name")
+            or info.get("name") or info.get("user_name") or ""
+        ).strip()
         if not nickname:
-            raise RuntimeError("已检测到登录状态，但未读取到账号昵称或用户 ID")
+            uid = str(info.get("uid") or info.get("sec_uid") or "").strip()
+            detail = f"（已读取用户 ID：{uid}，但没有昵称字段）" if uid else ""
+            raise RuntimeError(f"已检测到登录状态，但未读取到账号昵称{detail}")
+
+        actual_uid = str(
+            info.get("uid") or info.get("sec_uid") or info.get("user_id") or ""
+        ).strip()
+        # 绑定过的平台 UID 是账号归属的硬约束。读取器若发现当前窗口
+        # 已经切换到另一个账号，不能把对方昵称写回本账号。
+        if expected_uid and actual_uid and expected_uid != actual_uid:
+            raise RuntimeError(
+                f"当前窗口账号与已绑定平台 UID 不一致：期望 {expected_uid}，实际 {actual_uid}"
+            )
 
         with self._lead_lock:
             conn = self._lead_connection()
             try:
                 duplicate = conn.execute(
-                    "SELECT id FROM accounts WHERE platform = ? AND name = ? AND id <> ?",
+                    "SELECT id FROM accounts WHERE platform = ? AND nickname = ? AND id <> ?",
                     (platform, nickname, account_id),
                 ).fetchone()
                 if duplicate:
                     raise RuntimeError(f"该平台账号已绑定到账号记录 #{int(duplicate['id'])}")
                 conn.execute(
-                    "UPDATE accounts SET name = ?, bb_window_id = ?, platform = ? WHERE id = ?",
-                    (nickname, window_id, platform, account_id),
+                    "UPDATE accounts SET nickname = ?, platform_user_id = ?, "
+                    "bb_window_id = ?, platform = ? WHERE id = ?",
+                    (nickname, actual_uid or expected_uid or None, window_id, platform, account_id),
                 )
                 conn.commit()
             finally:
                 conn.close()
         self._on_scheduler_log(f"✅ 已读取并绑定账号：{platform}·{nickname}（窗口 {window_id}）")
-        return {"account_id": account_id, "name": nickname, "platform": platform, "window_id": window_id}
+        return {
+            "account_id": account_id,
+            "name": str(account.get("name") or ""),
+            "nickname": nickname,
+            "platform": platform,
+            "window_id": window_id,
+        }
+
+    def _refresh_account_nicknames(self, client=None) -> dict[str, Any]:
+        """为账号管理页补读昵称；只跳过真实占用中的账号，先清理残留状态。"""
+        reconcile = getattr(self.scheduler, "_reconcile_stale_account_states", None)
+        if callable(reconcile):
+            reconcile()
+        owner_id = self._owner_user_id(client)
+        with self._lead_lock:
+            conn = self._lead_connection()
+            try:
+                if owner_id is None:
+                    rows = conn.execute(
+                        "SELECT id, status FROM accounts ORDER BY id"
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT id, status FROM accounts WHERE owner_user_id = ? ORDER BY id",
+                        (owner_id,),
+                    ).fetchall()
+            finally:
+                conn.close()
+
+        updated = []
+        skipped = []
+        failed = []
+        active_statuses = {"working", "cooldown", "waiting_human", "frozen"}
+        for row in rows:
+            account_id = int(row["id"])
+            status = str(row["status"] or "idle")
+            if status in active_statuses:
+                skipped.append({"account_id": account_id, "reason": "账号正在工作，已跳过"})
+                continue
+            try:
+                result = self._bind_account({"account_id": account_id})
+                updated.append({
+                    "account_id": account_id,
+                    "nickname": str(result.get("nickname") or ""),
+                })
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                failed.append({"account_id": account_id, "message": message})
+                self._on_scheduler_log(
+                    f"账号昵称读取失败：账号#{account_id} · {message}"
+                )
+        self._on_scheduler_log(
+            f"账号昵称刷新完成：读取成功 {len(updated)} 个，跳过 {len(skipped)} 个，失败 {len(failed)} 个"
+        )
+        return {"updated": updated, "skipped": skipped, "failed": failed}
 
     def _add_leads_to_interaction(self, args: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -1447,7 +1803,7 @@ class BackendService:
             "reply_status": item.status or "draft",
             "reply_status_label": {
                 "draft": "待生成", "queued": "待发送", "sent": "已回复",
-                "replied": "已回复", "failed": "失败",
+                "replied": "已回复", "failed": "失败", "sending": "发送中",
             }.get(item.status or "draft", item.status or "draft"),
             "customer_replied": bool(item.customer_replied),
             "customer_replied_label": "是" if item.customer_replied else "否",
@@ -1468,13 +1824,14 @@ class BackendService:
         reply_adapter = None
         private_message_adapter = None
         browser = getattr(self.scheduler, "bb", None)
+        browser_reply_adapter = None
         if browser is not None:
             try:
                 try:
                     from .interactions.browser_reply import BitBrowserReplyAdapter  # type: ignore
                 except ImportError:  # pragma: no cover
                     from interactions.browser_reply import BitBrowserReplyAdapter  # type: ignore
-                reply_adapter = BitBrowserReplyAdapter(browser)
+                browser_reply_adapter = BitBrowserReplyAdapter(browser)
                 try:
                     from .interactions.private_message import BitBrowserPrivateMessageAdapter  # type: ignore
                 except ImportError:  # pragma: no cover
@@ -1482,8 +1839,31 @@ class BackendService:
                 private_message_adapter = BitBrowserPrivateMessageAdapter(browser)
             except Exception:
                 # 列表和草稿编辑不应因浏览器适配器初始化失败而不可用。
-                reply_adapter = None
+                browser_reply_adapter = None
                 private_message_adapter = None
+        tieba_reply_adapter = None
+        collector = getattr(self.scheduler, "collector", None)
+        tieba_collector = getattr(collector, "tieba", None)
+        if tieba_collector is not None and hasattr(tieba_collector, "_client"):
+            try:
+                try:
+                    from .interactions.tieba_reply import TiebaReplyAdapter, RoutingReplyAdapter  # type: ignore
+                except ImportError:  # pragma: no cover
+                    from interactions.tieba_reply import TiebaReplyAdapter, RoutingReplyAdapter  # type: ignore
+                tieba_reply_adapter = TiebaReplyAdapter(tieba_collector._client)
+            except Exception:
+                tieba_reply_adapter = None
+        if browser_reply_adapter is not None or tieba_reply_adapter is not None:
+            try:
+                try:
+                    from .interactions.tieba_reply import RoutingReplyAdapter  # type: ignore
+                except ImportError:  # pragma: no cover
+                    from interactions.tieba_reply import RoutingReplyAdapter  # type: ignore
+                reply_adapter = RoutingReplyAdapter(
+                    browser_reply_adapter, tieba_reply_adapter
+                )
+            except Exception:
+                reply_adapter = browser_reply_adapter or tieba_reply_adapter
         return InteractionService(
             InteractionRepository(conn),
             LeadRepository(conn),
@@ -1996,11 +2376,13 @@ class BackendService:
 
         llm_config = AppConfig().llm_api() or {}
         llm_enabled = bool(llm_config.get("enabled"))
-        llm_configured = bool(
-            str(llm_config.get("base_url") or "").strip()
-            and str(llm_config.get("model") or "").strip()
-        )
+        llm_configured = LLMApiClient.is_configured(llm_config)
         if llm_enabled and llm_configured:
+            self._on_scheduler_log(
+                "发布工作区智能 API 开始调用："
+                f"{str(llm_config.get('provider') or '自定义服务').strip()} / "
+                f"{str(llm_config.get('model') or '').strip()}"
+            )
             try:
                 generated = LLMApiClient.generate_content(
                     llm_config, keyword, platform, source_ref
@@ -2073,11 +2455,32 @@ class BackendService:
         self._on_scheduler_log(f"生成内容已导入发布草稿：生成内容#{generated_id} → 草稿#{draft_id}")
         return {"generated_id": generated_id, "draft_id": draft_id}
 
+    def _delete_generated_content(self, args: Mapping[str, Any], client=None) -> dict[str, Any]:
+        generated_id = self._int_arg(args, "generated_id")
+        snapshot = self._require_owned_row(
+            "generated_contents", generated_id, "owner_user_id", client, "生成内容"
+        )
+        with self._lead_lock:
+            conn = self._lead_connection()
+            try:
+                self._workspace_service(conn).delete_generated(generated_id)
+            finally:
+                conn.close()
+        # 员工数据开启同步时，删除操作也要进入 outbox，避免其它终端保留旧记录。
+        if snapshot.get("owner_user_id") is not None:
+            self._queue_deleted_snapshot(
+                "generated_contents", generated_id, client,
+                "generated_content", snapshot,
+            )
+        self._on_scheduler_log(f"发布工作区生成内容已删除：#{generated_id}")
+        return {"generated_id": generated_id, "deleted": True}
+
     def _schedule_publish(self, args: Mapping[str, Any], client=None) -> dict[str, Any]:
         draft_id = self._int_arg(args, "draft_id")
         account_id = self._int_arg(args, "account_id")
         platform = str(args.get("platform") or "").strip().lower()
         raw_scheduled_at = str(args.get("scheduled_at") or "").strip()
+        real_send_authorized = bool(args.get("real_send_authorized", False))
         try:
             from .time_utils import normalize_scheduled_at  # type: ignore
         except ImportError:  # pragma: no cover - 顶层脚本入口
@@ -2093,16 +2496,30 @@ class BackendService:
                 job_id = service.schedule_variant(
                     draft_id=draft_id, platform=platform, account_id=account_id,
                     scheduled_at=scheduled_at,
+                    real_send_authorized=real_send_authorized,
                 )
                 self._queue_entity("publish_drafts", draft_id, client, "publish_draft")
             finally:
                 conn.close()
         self._on_scheduler_log(
             f"发布任务已加入队列：草稿#{draft_id} · {self._platform_label(platform)} · "
-            f"账号#{account_id} · {'定时 ' + scheduled_at if scheduled_at else '立即准备'}"
+            f"账号#{account_id} · {'定时 ' + scheduled_at if scheduled_at else '立即准备'} · "
+            f"真实发布授权={'是' if real_send_authorized else '否'}"
         )
+        if scheduled_at and not real_send_authorized:
+            self._on_scheduler_log(
+                f"定时发布等待真实发布授权：草稿#{draft_id} · 任务#{job_id} · "
+                "当前不会在到点时点击平台最终发布按钮"
+            )
+        elif scheduled_at:
+            self._on_scheduler_log(
+                f"定时发布已启用：任务#{job_id} · 到点由后台自动打开账号浏览器并执行发布"
+            )
         return {"job_id": job_id, "draft_id": draft_id, "account_id": account_id,
-                "platform": platform, "scheduled_at": scheduled_at, "send_clicked": False}
+                "platform": platform, "scheduled_at": scheduled_at, "send_clicked": False,
+                "real_send_authorized": real_send_authorized,
+                "execution": "scheduled" if scheduled_at and real_send_authorized
+                else ("waiting_real_authorization" if scheduled_at else "queued")}
 
     def _list_published_messages(self, args: Mapping[str, Any], client=None) -> dict[str, Any]:
         with self._lead_lock:
@@ -2130,6 +2547,135 @@ class BackendService:
             finally:
                 conn.close()
         return {"message_id": message_id, "read": read}
+
+    @staticmethod
+    def _message_reply_url(platform: str, message: Mapping[str, Any]) -> str:
+        """选择消息中心人工回复的安全落点。"""
+        try:
+            from .publishing.message_reader import MESSAGE_ENTRY_URLS  # type: ignore
+        except ImportError:  # pragma: no cover
+            from publishing.message_reader import MESSAGE_ENTRY_URLS  # type: ignore
+        platform = str(platform or "").strip().lower()
+        allowed_hosts = {
+            "douyin": ("douyin.com",),
+            "xhs": ("xiaohongshu.com",),
+            "bilibili": ("bilibili.com",),
+            "weibo": ("weibo.com", "weibo.cn"),
+        }.get(platform, ())
+        kind = str(message.get("message_type") or "").strip().lower()
+        if kind in {"comment", "reply", "mention"}:
+            candidates = (
+                str(message.get("source_url") or "").strip(),
+                str(message.get("message_url") or "").strip(),
+            )
+        else:
+            candidates = (
+                str(message.get("message_url") or "").strip(),
+                str(message.get("source_url") or "").strip(),
+            )
+        for candidate in candidates:
+            try:
+                parts = urlsplit(candidate)
+            except ValueError:
+                continue
+            host = str(parts.hostname or "").lower().rstrip(".")
+            if parts.scheme not in {"http", "https"} or not host:
+                continue
+            if any(host == suffix or host.endswith("." + suffix) for suffix in allowed_hosts):
+                return candidate
+        return str(MESSAGE_ENTRY_URLS.get(platform) or "")
+
+    def _open_published_message_browser(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        """打开消息对应账号的 BitBrowser 页面，停在可人工回复的页面。
+
+        这里只导航，不查找输入框、不填充、不点击发送，避免把消息通知
+        误当成评论回复；实际回复由用户在对应浏览器窗口内完成。
+        """
+        message_id = self._int_arg(args, "message_id")
+        with self._lead_lock:
+            conn = self._lead_connection()
+            try:
+                row = conn.execute(
+                    "SELECT m.id, m.account_id, m.platform, m.message_type, m.nickname, m.content, "
+                    "m.message_url, m.source_url, m.source_title, a.name AS account_name, "
+                    "a.bb_window_id FROM published_messages m "
+                    "LEFT JOIN accounts a ON a.id = m.account_id WHERE m.id = ?",
+                    (message_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        if row is None:
+            raise ValueError(f"消息不存在: {message_id}")
+        account_id = int(row["account_id"] or 0)
+        platform = str(row["platform"] or "").strip().lower()
+        window_id = str(row["bb_window_id"] or "").strip()
+        if not window_id:
+            raise RuntimeError("该消息对应账号尚未绑定 BitBrowser 窗口")
+        if window_id in {"chrome", "chrome-bilibili"}:
+            raise RuntimeError("该账号使用外部 Chrome 会话，请手动打开对应浏览器")
+        browser = getattr(self.scheduler, "bb", None)
+        if browser is None:
+            raise RuntimeError("BitBrowser 客户端未配置")
+        target_url = self._message_reply_url(platform, dict(row))
+        if not target_url:
+            raise ValueError(f"平台暂不支持消息回复入口: {platform}")
+        opened = browser.open_browser(
+            window_id, ignore_default_urls=True, new_page_url=target_url,
+        )
+        if not isinstance(opened, Mapping):
+            raise RuntimeError("BitBrowser 未返回浏览器连接信息")
+        ws_url = str(opened.get("ws") or opened.get("webSocketDebuggerUrl") or "").strip()
+        if not ws_url:
+            raise RuntimeError("浏览器已打开，但未返回 CDP 连接地址")
+
+        # new_page_url 是启动参数；再次通过 CDP 导航，确保复用窗口时不
+        # 停留在默认导航页或上一次页面。
+        try:
+            import asyncio
+            try:
+                from .cdp import CdpSession  # type: ignore
+            except ImportError:  # pragma: no cover
+                from cdp import CdpSession  # type: ignore
+
+            async def navigate():
+                session = CdpSession(ws_url, timeout=25.0)
+                await session.connect()
+                try:
+                    page_session = await session.attach_page()
+                    await session.navigate(target_url, page_session, wait_load=False)
+                finally:
+                    await session.close()
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(navigate())
+            finally:
+                loop.close()
+        except Exception as exc:
+            raise RuntimeError(f"消息回复页面导航失败：{type(exc).__name__}: {exc}") from exc
+
+        focused = _focus_opened_browser(browser, opened, window_id)
+
+        try:
+            path = self._account_ws_path(platform)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(window_id + "\n" + ws_url + "\n")
+        except (OSError, ValueError):
+            # 页面导航已经成功，运行时缓存写失败不应误报浏览器未打开。
+            pass
+        account_name = str(row["account_name"] or account_id)
+        self._on_scheduler_log(
+            f"消息中心已打开回复窗口：消息#{message_id} · 账号#{account_id} {account_name} · "
+            f"{self._platform_label(platform)} · 仅打开页面，等待人工回复"
+            + (" · 已切到前台" if focused else "")
+        )
+        return {
+            "message_id": message_id, "account_id": account_id,
+            "platform": platform, "window_id": window_id,
+            "url": target_url, "opened": True, "manual_only": True,
+            "message": "已打开对应浏览器回复页面，请人工确认后回复",
+        }
 
     def _message_sync_lock(self, account_id: int) -> threading.Lock:
         with self._message_sync_locks_guard:
@@ -2262,6 +2808,10 @@ class BackendService:
         if status == "sent":
             return ["sent", "replied"]
         if status in {"draft", "queued", "failed"}:
+            if status == "queued":
+                # 发送浏览器较慢时，草稿会短暂处于 sending。把它留在
+                # 待发送查询中，界面可以显示“发送中”，而不是让内容凭空消失。
+                return ["queued", "sending"]
             return [status]
         raise ValueError("互动状态必须是 draft、queued、sent 或 failed")
 
@@ -2564,17 +3114,47 @@ class BackendService:
         confirmed = bool(args.get("confirm_real_send", False))
         if real_send and not confirmed:
             raise ValueError("真实发送必须先完成确认")
-        with self._lead_lock:
-            conn = self._lead_connection()
-            try:
-                service = self._interaction_service(conn)
-                results = []
-                for draft_id in draft_ids:
+        try:
+            from .config_loader import AppConfig  # type: ignore
+        except ImportError:  # pragma: no cover
+            from config_loader import AppConfig  # type: ignore
+        interaction_config = AppConfig().interaction() or {}
+        try:
+            reply_cooldown = float(
+                interaction_config.get("batch_reply_cooldown_seconds", 5.0)
+            )
+        except (TypeError, ValueError):
+            reply_cooldown = 5.0
+        try:
+            long_cooldown = float(
+                interaction_config.get("batch_reply_long_cooldown_seconds", 60.0)
+            )
+        except (TypeError, ValueError):
+            long_cooldown = 60.0
+        try:
+            long_cooldown_every = int(
+                interaction_config.get("batch_reply_long_cooldown_every", 10)
+            )
+        except (TypeError, ValueError):
+            long_cooldown_every = 10
+        reply_cooldown = max(0.0, min(30.0, reply_cooldown))
+        long_cooldown = max(0.0, min(300.0, long_cooldown))
+        long_cooldown_every = max(1, min(1000, long_cooldown_every))
+        conn = self._lead_connection()
+        try:
+            service = self._interaction_service(conn)
+            results = []
+            for index, draft_id in enumerate(draft_ids, start=1):
+                # 浏览器导航和平台 DOM 等待可能持续几十秒；只锁定同一草稿，
+                # 不再占用全局线索锁，保证状态查询、日志和其他页面仍可响应。
+                with self._interaction_send_lock(draft_id):
+                    initial_status = ""
                     try:
                         draft = None
                         repo = getattr(service, "_repo", None)
                         if repo is not None and hasattr(repo, "get_draft"):
                             draft = repo.get_draft(draft_id)
+                            initial_status = str((draft or {}).get("status") or "").lower()
                         interaction_type = str(
                             (draft or {}).get("interaction_type") or "comment_reply"
                         ).strip().lower()
@@ -2593,51 +3173,84 @@ class BackendService:
                             )
                         else:
                             result = service.simulate_browser_reply(draft_id, account_id)
+                        final_status = ""
+                        if repo is not None and hasattr(repo, "get_draft"):
+                            final = repo.get_draft(draft_id)
+                            final_status = str((final or {}).get("status") or "").lower()
                         results.append({
                             "draft_id": draft_id,
                             "ok": bool(result.ok),
                             "stage": result.stage,
                             "message": result.message,
                             "verified": bool(result.verified),
+                            "status": final_status,
                         })
                     except Exception as exc:  # noqa: BLE001
                         # 1.2 的批量回复在每条异常后都会落失败状态；2.0
                         # 不能只把异常塞进返回数组，否则内容会一直卡在
                         # 待发送池，用户也看不到失败原因。
                         message = str(exc)
-                        try:
-                            service.mark_reply_failed(draft_id, message, account_id)
-                        except Exception:
-                            # 原始异常优先返回；状态更新失败不应遮蔽真正原因。
-                            pass
+                        # 另一个重复请求可能只读到了 sending 状态；它没有
+                        # 发送所有权，不能把仍在执行的第一次发送改成 failed。
+                        if initial_status != "sending":
+                            try:
+                                service.mark_reply_failed(draft_id, message, account_id)
+                            except Exception:
+                                # 原始异常优先返回；状态更新失败不应遮蔽真正原因。
+                                pass
+                        final_status = ""
+                        repo = getattr(service, "_repo", None)
+                        if repo is not None and hasattr(repo, "get_draft"):
+                            final = repo.get_draft(draft_id)
+                            final_status = str((final or {}).get("status") or "").lower()
                         results.append({
                             "draft_id": draft_id,
                             "ok": False,
                             "stage": type(exc).__name__,
                             "message": message,
                             "verified": False,
+                            "status": final_status,
                         })
-                return {"results": results, "real_send": real_send}
-            finally:
-                conn.close()
+                if index < len(draft_ids):
+                    if index % long_cooldown_every == 0 and long_cooldown > 0:
+                        self._on_scheduler_log(
+                            f"批量互动长冷却：已连续处理 {index} 条，"
+                            f"等待 {long_cooldown:g} 秒后继续"
+                        )
+                        time.sleep(long_cooldown)
+                    elif reply_cooldown > 0:
+                        self._on_scheduler_log(
+                            f"批量互动冷却：草稿#{draft_id} 已处理，"
+                            f"等待 {reply_cooldown:g} 秒后切换下一条"
+                        )
+                        time.sleep(reply_cooldown)
+            return {"results": results, "real_send": real_send}
+        finally:
+            conn.close()
 
     @staticmethod
     def _platform_label(platform: str) -> str:
         return {
-            "douyin": "抖音", "xhs": "小红书",
-            "bilibili": "B站", "weibo": "微博", "kuaishou": "快手",
+            "douyin": "抖音", "dy": "抖音", "抖音": "抖音",
+            "xhs": "小红书", "xiaohongshu": "小红书", "小红书": "小红书",
+            "bilibili": "B站", "b站": "B站", "weibo": "微博",
+            "kuaishou": "快手", "ks": "快手", "快手": "快手",
+            "tieba": "百度贴吧", "贴吧": "百度贴吧",
         }.get(str(platform or ""), str(platform or "未知平台"))
 
     def _diagnostics_snapshot(self) -> dict[str, Any]:
         """读取诊断摘要，不自动触碰浏览器、不执行网络探测。"""
         try:
             from .config_loader import AppConfig  # type: ignore
+            from .llm_api import LLMApiClient  # type: ignore
         except ImportError:  # pragma: no cover
             from config_loader import AppConfig  # type: ignore
+            from llm_api import LLMApiClient  # type: ignore
 
         config = AppConfig()
         bitbrowser = config.bitbrowser() or {}
         llm = config.llm_api() or {}
+        tieba = config.tieba_api() or {}
         health_rows = []
         account_rows = []
         with self._lead_lock:
@@ -2651,7 +3264,7 @@ class BackendService:
                         "AND h2.check_name = h.check_name "
                         "ORDER BY h2.observed_at DESC, h2.id DESC LIMIT 1) "
                         "ORDER BY h.platform, h.check_name"
-                    ).fetchall()]
+                    ).fetchall() if str(row["platform"] or "").strip().lower() not in _HIDDEN_PLATFORMS]
                 except Exception:
                     health_rows = []
                 raw_accounts = conn.execute(
@@ -2751,10 +3364,13 @@ class BackendService:
                 "provider": str(llm.get("provider") or ""),
                 "model": str(llm.get("model") or ""),
                 "base_url": str(llm.get("base_url") or "").split("?", 1)[0],
-                "configured": bool(
-                    str(llm.get("base_url") or "").strip()
-                    and str(llm.get("model") or "").strip()
-                ),
+                "configured": LLMApiClient.is_configured(llm),
+            },
+            "tieba_api": {
+                "enabled": bool(tieba.get("enabled", False)),
+                "configured": bool(str(tieba.get("token") or "").strip()),
+                "token_configured": bool(str(tieba.get("token") or "").strip()),
+                "base_url": "https://tieba.baidu.com",
             },
             "accounts": account_rows,
             "health": health_rows,
@@ -2782,7 +3398,12 @@ class BackendService:
 
         bitbrowser = args.get("bitbrowser") or {}
         llm_api = args.get("llm_api") or {}
-        if not isinstance(bitbrowser, Mapping) or not isinstance(llm_api, Mapping):
+        tieba_api = args.get("tieba_api")
+        if tieba_api is None:
+            tieba_api = {}
+        if (not isinstance(bitbrowser, Mapping)
+                or not isinstance(llm_api, Mapping)
+                or not isinstance(tieba_api, Mapping)):
             raise ValueError("设置分区格式不正确")
         base_url = str(bitbrowser.get("base_url") or "").strip().rstrip("/")
         if not base_url:
@@ -2805,6 +3426,7 @@ class BackendService:
         config = AppConfig()
         config.update_section("bitbrowser", {"base_url": base_url, "timeout": timeout})
         current_llm = config.llm_api() or {}
+        current_tieba = config.tieba_api() or {}
         # QML 不回读旧 Key。输入框留空表示保留已有 Key，避免修改其它字段时
         # 意外清除可用配置；需要更换 Key 时直接填写新值。
         if not api_key:
@@ -2818,6 +3440,21 @@ class BackendService:
             "timeout": api_timeout,
         }
         config.update_section("llm_api", api_values)
+        tieba_token = str(tieba_api.get("token") or "").strip()
+        if not tieba_token:
+            tieba_token = str(current_tieba.get("token") or "").strip()
+        if len(tieba_token) > 4096:
+            raise ValueError("贴吧 TB_TOKEN 长度不合法")
+        try:
+            tieba_timeout = max(1, min(300, int(tieba_api.get("timeout") or current_tieba.get("timeout") or 30)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("贴吧 API 超时必须是 1–300 的整数") from exc
+        tieba_values = {
+            "enabled": bool(tieba_api.get("enabled", current_tieba.get("enabled", False))),
+            "token": tieba_token,
+            "timeout": tieba_timeout,
+        }
+        config.update_section("tieba_api", tieba_values)
 
         # 保存连接设置后，让独立后台的 Scheduler 和采集/回复对象立即使用新客户端。
         try:
@@ -2845,6 +3482,10 @@ class BackendService:
             for obj in collectors:
                 if obj is not None and hasattr(obj, "bb"):
                     obj.bb = browser
+            collector = getattr(self.scheduler, "collector", None)
+            tieba_collector = getattr(collector, "tieba", None) if collector is not None else None
+            if tieba_collector is not None and hasattr(tieba_collector, "set_token"):
+                tieba_collector.set_token(tieba_token)
         except Exception as exc:
             # 配置已经落盘；客户端替换失败仍返回明确状态，便于下一次检测重试。
             return {
@@ -2853,7 +3494,10 @@ class BackendService:
                 "error": f"连接客户端应用失败：{type(exc).__name__}",
                 "bitbrowser": {"configured": True, "timeout": timeout, "base_url": base_url},
                 "llm_api": {"enabled": api_values["enabled"], "provider": provider,
-                            "model": model, "configured": bool(api_base_url and model)},
+                            "model": model, "configured": bool(api_base_url and api_key)},
+                "tieba_api": {"enabled": tieba_values["enabled"],
+                              "configured": bool(tieba_token),
+                              "token_configured": bool(tieba_token)},
             }
         return {
             "saved": True,
@@ -2861,6 +3505,47 @@ class BackendService:
             "bitbrowser": {"configured": True, "timeout": timeout, "base_url": base_url},
             "llm_api": {"enabled": api_values["enabled"], "provider": provider,
                         "model": model, "configured": bool(api_base_url and api_key)},
+            "tieba_api": {"enabled": tieba_values["enabled"],
+                          "configured": bool(tieba_token),
+                          "token_configured": bool(tieba_token)},
+        }
+
+    def _save_tieba_settings(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        """独立保存贴吧 API 设置，避免修改其它连接配置时误清空令牌。"""
+        try:
+            from .config_loader import AppConfig  # type: ignore
+        except ImportError:  # pragma: no cover
+            from config_loader import AppConfig  # type: ignore
+
+        config = AppConfig()
+        current = config.tieba_api() or {}
+        token = str(args.get("token") or "").strip() or str(current.get("token") or "").strip()
+        if len(token) > 4096:
+            raise ValueError("贴吧 TB_TOKEN 长度不合法")
+        try:
+            timeout = max(1, min(300, int(args.get("timeout") or current.get("timeout") or 30)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("贴吧 API 超时必须是 1–300 的整数") from exc
+        enabled = bool(args.get("enabled", current.get("enabled", False)))
+        config.update_section("tieba_api", {"enabled": enabled, "token": token, "timeout": timeout})
+
+        scheduler = getattr(self, "scheduler", None)
+        collector = getattr(scheduler, "collector", None) if scheduler is not None else None
+        tieba = getattr(collector, "tieba", None) if collector is not None else None
+        if tieba is not None and hasattr(tieba, "set_token"):
+            tieba.set_token(token)
+        self._on_scheduler_log(
+            f"贴吧 API 设置已保存：{'已启用' if enabled else '未启用'}，令牌{'已配置' if token else '未配置'}"
+        )
+        return {
+            "saved": True,
+            "applied": tieba is None or hasattr(tieba, "set_token"),
+            "tieba_api": {
+                "enabled": enabled,
+                "configured": bool(token),
+                "token_configured": bool(token),
+                "base_url": "https://tieba.baidu.com",
+            },
         }
 
     def _browser_for_diagnostics(self):
@@ -3314,6 +3999,32 @@ class BackendService:
         label = f"{date}_{keyword}_批次{int(task_id)}_{platform}"
         return re.sub(r'[\\/:*?"<>|]+', "_", label).strip(" .")
 
+    @staticmethod
+    def _resolve_task_export_base(task: Mapping[str, Any], project_root: str) -> str:
+        """统一解析任务导出根目录，避免员工端把相对目录写到项目根目录。
+
+        任务表里的旧值通常是 ``data/exports``，而用户也可能只填写
+        ``任务包``。前者仍按项目根解析；后者统一作为默认导出目录下的
+        子目录，保证文件不会落到安装包外层的隐蔽位置。
+        """
+        raw = str(task.get("output_dir") or "").strip()
+        default_dir = os.path.join(project_root, "data", "exports")
+        if not raw:
+            return os.path.abspath(default_dir)
+        if os.path.isabs(raw):
+            return os.path.abspath(raw)
+        # 任务历史值可能来自 Windows（反斜杠），在当前系统上统一成
+        # pathlib 路径；否则 macOS 会把 ``data\\exports`` 当成普通文件名。
+        normalized = raw.replace("\\", os.sep).replace("/", os.sep).strip("\\/")
+        normalized_path = Path(normalized)
+        normalized_key = normalized_path.as_posix().strip("/").lower()
+        data_exports_key = Path("data") / "exports"
+        if normalized_key == data_exports_key.as_posix():
+            return os.path.abspath(default_dir)
+        if normalized_key.startswith(data_exports_key.as_posix() + "/"):
+            return os.path.abspath(os.path.join(project_root, *normalized_path.parts))
+        return os.path.abspath(os.path.join(default_dir, *normalized_path.parts))
+
     def _export_task(self, task_id: int) -> dict[str, Any]:
         """直接从任务数据库导出，放在 UI 客户端线程之外执行。"""
         tid = int(task_id)
@@ -3373,6 +4084,9 @@ class BackendService:
                 "kind": str(task.get("platform") or "douyin"),
                 "pid": video.get("vid") or "",
                 "title": video.get("title") or "",
+                # 贴吧搜索结果把帖子正文摘要保存在 extra.abstract；导出时
+                # 需要把它作为帖子内容保留下来，即使帖子楼层暂时不可读。
+                "content": extra.get("content") or extra.get("abstract") or "",
                 "author": video.get("author") or "",
                 "pub_str": extra.get("create_time", ""),
                 "collected_at": video.get("collected_at") or "",
@@ -3381,11 +4095,7 @@ class BackendService:
             })
 
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(self.scheduler.db_path)))
-        base_dir = str(task.get("output_dir") or "").strip()
-        if not base_dir:
-            base_dir = os.path.join(project_root, "data", "exports")
-        elif not os.path.isabs(base_dir):
-            base_dir = os.path.join(project_root, base_dir)
+        base_dir = self._resolve_task_export_base(task, project_root)
         outdir = os.path.join(os.path.abspath(base_dir), self._export_task_label(task, tid))
         result = export_report.export_unified(items, outdir, self._export_task_label(task, tid))
         message = (
@@ -3453,20 +4163,12 @@ class BackendService:
         if not task:
             raise ValueError(f"任务不存在: {tid}")
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(self.scheduler.db_path)))
-        base_dir = str(task.get("output_dir") or "").strip()
-        if not base_dir:
-            base_dir = os.path.join(project_root, "data", "exports")
-        elif not os.path.isabs(base_dir):
-            base_dir = os.path.join(project_root, base_dir)
+        base_dir = self._resolve_task_export_base(task, project_root)
         path = os.path.abspath(os.path.join(
             base_dir, self._export_task_label(task, tid)
         ))
         os.makedirs(path, exist_ok=True)
-        if hasattr(os, "startfile"):
-            os.startfile(path)
-        else:  # pragma: no cover - 仅兼容非 Windows 预览环境
-            import webbrowser
-            webbrowser.open(path)
+        open_path(path)
         return {"task_id": tid, "path": path}
 
     def dispatch(self, message: Mapping[str, Any], *, client=None) -> dict[str, Any]:
@@ -3600,13 +4302,13 @@ class BackendService:
                     "INSERT INTO employee_devices "
                     "(user_id, device_id, device_name, client_version, status, "
                     "first_seen_at, last_seen_at, last_ip) VALUES (?, ?, ?, ?, 'active', ?, ?, '')",
-                    (uid, device_id, name, "2.0", stamp, stamp),
+                    (uid, device_id, name, APP_VERSION, stamp, stamp),
                 )
             else:
                 conn.execute(
                     "UPDATE employee_devices SET device_name = ?, client_version = ?, "
                     "status = 'active', last_seen_at = ? WHERE id = ?",
-                    (name, "2.0", stamp, int(current["id"])),
+                    (name, APP_VERSION, stamp, int(current["id"])),
                 )
             state = conn.execute(
                 "SELECT user_id FROM sync_state WHERE user_id = ?", (uid,)
@@ -3658,11 +4360,17 @@ class BackendService:
             if isinstance(value, Mapping) and owned(value)
         }
         totals = dict(snapshot.get("totals") or {})
+        def terminal_task_done(item):
+            status = str(item.get("status") or "")
+            if status in ("done", "completed", "no_more"):
+                return True
+            return status == "incomplete" and bool(item.get("search_exhausted"))
+
         totals.update({
             "tasks": len(tasks),
             "tasks_running": sum(1 for item in tasks.values()
-                                  if item.get("status") in ("phase_a_search", "phase_b_comments")),
-            "tasks_done": sum(1 for item in tasks.values() if item.get("status") == "done"),
+                                  if item.get("status") in ("phase_a_search", "phase_b_comments", "running")),
+            "tasks_done": sum(1 for item in tasks.values() if terminal_task_done(item)),
             "videos_total": sum(int(item.get("videos_total") or 0) for item in tasks.values()),
             "videos_done": sum(int(item.get("video_done") or 0) for item in tasks.values()),
             "comments": sum(int(item.get("comments") or 0) for item in tasks.values()),
@@ -3840,12 +4548,13 @@ class BackendService:
             "open_account_browser", "bind_account", "remove_account", "resolve_human",
             "list_account_contents", "sync_account_contents", "list_published_messages",
             "preview_publish_draft", "real_publish_draft", "schedule_publish",
+            "refresh_account_nicknames",
         }
         if command in account_commands:
             account_id = self._int_arg(args, "account_id", required=False)
             if account_id is not None and account_id > 0:
                 self._require_owned_row("accounts", account_id, "owner_user_id", client, "账号")
-            elif command not in {"list_published_messages"}:
+            elif command not in {"list_published_messages", "refresh_account_nicknames"}:
                 raise self._auth_error_type("forbidden", "员工操作必须指定自己的账号")
 
         lead_commands = {
@@ -3870,6 +4579,12 @@ class BackendService:
         if command in draft_commands:
             draft_id = self._int_arg(args, "draft_id")
             self._require_owned_row("publish_drafts", draft_id, "owner_user_id", client, "发布草稿")
+
+        if command == "delete_generated_content":
+            generated_id = self._int_arg(args, "generated_id")
+            self._require_owned_row(
+                "generated_contents", generated_id, "owner_user_id", client, "生成内容"
+            )
 
         if command in {"interaction_action"}:
             draft_id = self._int_arg(args, "draft_id")
@@ -3933,6 +4648,20 @@ class BackendService:
                 raise ValueError(f"消息不存在: {message_id}")
             self._require_owned_row("accounts", int(row["account_id"]), "owner_user_id", client, "账号")
 
+        if command == "open_published_message_browser":
+            message_id = self._int_arg(args, "message_id")
+            conn = self._lead_connection()
+            try:
+                row = conn.execute(
+                    "SELECT account_id FROM published_messages WHERE id = ?",
+                    (message_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is None:
+                raise ValueError(f"消息不存在: {message_id}")
+            self._require_owned_row("accounts", int(row["account_id"]), "owner_user_id", client, "账号")
+
         if command == "import_generated_content":
             generated_id = self._int_arg(args, "generated_id")
             self._require_owned_row("generated_contents", generated_id, "owner_user_id", client, "生成内容")
@@ -3948,6 +4677,28 @@ class BackendService:
     def _dispatch_command(self, command: str, args: Mapping[str, Any], *, client=None) -> Any:
         scheduler = self.scheduler
         if command == "auth_register":
+            remote = self._remote_auth_client(args)
+            if remote is not None:
+                result = remote.register(
+                    str(args.get("username") or ""),
+                    str(args.get("password") or ""),
+                    str(args.get("employee_name") or ""),
+                )
+                remote_user = result.get("user") if isinstance(result, Mapping) else None
+                if not isinstance(remote_user, Mapping):
+                    raise self._auth_error_type(
+                        "remote_auth_error", "统一账号服务返回的注册信息不完整"
+                    )
+                # 本机保留一个 pending 镜像，远程审批后登录时会更新它；
+                # 它只用于本机 owner 映射，不代表审批已经完成。返回值保持
+                # 与原本地 auth_register 相同，避免 GUI/旧客户端依赖顶层 status。
+                local_user = self._localize_remote_user(
+                    remote_user, password=args.get("password")
+                )
+                self._on_scheduler_log(
+                    f"统一账号注册申请已提交：账号 {str(args.get('username') or '').strip()}"
+                )
+                return local_user
             return self._auth_store.register(
                 args.get("username"), args.get("password"), args.get("employee_name")
             )
@@ -3955,23 +4706,130 @@ class BackendService:
             # 重新登录先清空旧会话；如果新账号密码错误，不能继续沿用
             # 之前账号的管理员/员工权限。
             if client is not None:
+                if getattr(client, "local_session_token", ""):
+                    try:
+                        self._auth_store.revoke_session(client.local_session_token)
+                    except Exception:
+                        pass
                 client.auth_user = None
-            user = self._auth_store.authenticate(args.get("username"), args.get("password"))
+                client.local_session_token = ""
+                client.remote_auth_client = None
+                client.remote_auth_token = ""
+            remote = self._remote_auth_client(args)
+            if remote is not None:
+                try:
+                    remote_result = remote.login(
+                        str(args.get("username") or ""),
+                        str(args.get("password") or ""),
+                    )
+                    remote_user = remote_result.get("user") if isinstance(remote_result, Mapping) else None
+                    remote_token = str(remote_result.get("session_token") or "") if isinstance(remote_result, Mapping) else ""
+                    if not isinstance(remote_user, Mapping) or not remote_token:
+                        raise self._auth_error_type("remote_auth_error", "统一账号服务返回的登录信息不完整")
+                    user = self._localize_remote_user(remote_user, password=args.get("password"))
+                    if client is not None:
+                        client.remote_auth_client = remote
+                        client.remote_auth_token = remote_token
+                except Exception as exc:
+                    # 远程服务暂时不可达时允许已有本机账号离线登录；
+                    # 远程返回待审批/拒绝/密码错误时绝不回退，避免绕过审批。
+                    code = str(getattr(exc, "code", "") or "")
+                    if code not in {"connection_failed", "invalid_response", "not_configured"}:
+                        raise
+                    user = self._auth_store.authenticate(args.get("username"), args.get("password"))
+            else:
+                user = self._auth_store.authenticate(args.get("username"), args.get("password"))
             if client is not None:
                 supplied_device_id = str(args.get("device_id") or "").strip()
                 if supplied_device_id:
                     client.device_id = supplied_device_id[:128]
                 self._touch_device(user, client)
                 client.auth_user = user
-            return {"authenticated": True, "user": user}
+                client.local_session_token = self._auth_store.create_session(int(user["id"]))
+            local_token = str(getattr(client, "local_session_token", "") or "") if client is not None else ""
+            return {
+                "authenticated": True,
+                "user": user,
+                "local_session_token": local_token,
+                "remote_session_token": str(getattr(client, "remote_auth_token", "") or "") if client is not None else "",
+                "auth_server_url": str(args.get("auth_server_url") or "").strip(),
+            }
+        if command == "auth_restore":
+            """Restore a remembered session without receiving a password."""
+            local_token = str(args.get("local_session_token") or "").strip()
+            remote_token = str(args.get("remote_session_token") or "").strip()
+            restored_user = None
+            restored_remote = None
+            # 优先向统一账号服务复核远程令牌；服务短暂不可达时再使用
+            # 本机镜像会话，保证升级/断网后仍能进入工作台。
+            if remote_token and str(args.get("auth_server_url") or "").strip():
+                remote = self._remote_auth_client(args)
+                try:
+                    remote_result = remote.me(remote_token)
+                    remote_user = remote_result.get("user") if isinstance(remote_result, Mapping) else None
+                    if isinstance(remote_user, Mapping):
+                        restored_user = self._localize_remote_user(remote_user)
+                        restored_remote = remote
+                except Exception as exc:
+                    code = str(getattr(exc, "code", "") or "")
+                    if code not in {"connection_failed", "invalid_response", "unauthorized", "auth_required"}:
+                        raise
+            if restored_user is None and local_token:
+                restored_user = self._auth_store.get_session_user(local_token)
+            if not restored_user:
+                raise self._auth_error_type("session_expired", "登录状态已失效，请重新登录")
+            if client is not None:
+                client.auth_user = restored_user
+                client.local_session_token = self._auth_store.create_session(int(restored_user["id"]))
+                client.remote_auth_client = restored_remote
+                client.remote_auth_token = remote_token if restored_remote is not None else ""
+                supplied_device_id = str(args.get("device_id") or "").strip()
+                if supplied_device_id:
+                    client.device_id = supplied_device_id[:128]
+                self._touch_device(restored_user, client)
+            return {
+                "authenticated": True,
+                "user": restored_user,
+                "local_session_token": str(getattr(client, "local_session_token", "") or "") if client is not None else "",
+                "remote_session_token": remote_token if restored_remote is not None else "",
+                "auth_server_url": str(args.get("auth_server_url") or "").strip(),
+            }
         if command == "auth_logout":
             if client is not None:
+                if getattr(client, "local_session_token", ""):
+                    try:
+                        self._auth_store.revoke_session(client.local_session_token)
+                    except Exception:
+                        pass
+                if getattr(client, "remote_auth_client", None) is not None and getattr(client, "remote_auth_token", ""):
+                    try:
+                        client.remote_auth_client.logout(client.remote_auth_token)
+                    except Exception:
+                        pass
                 client.auth_user = None
+                client.local_session_token = ""
+                client.remote_auth_client = None
+                client.remote_auth_token = ""
             return {"authenticated": False}
         if command == "auth_me":
             user = self._client_user(client)
             if not user:
                 return {"authenticated": False, "user": None}
+            if client is not None and getattr(client, "remote_auth_client", None) is not None and getattr(client, "remote_auth_token", ""):
+                try:
+                    remote_result = client.remote_auth_client.me(client.remote_auth_token)
+                    remote_user = remote_result.get("user") if isinstance(remote_result, Mapping) else None
+                    if isinstance(remote_user, Mapping):
+                        user = self._localize_remote_user(remote_user)
+                        client.auth_user = user
+                        return {"authenticated": True, "user": user}
+                except Exception as exc:
+                    code = str(getattr(exc, "code", "") or "")
+                    if code not in {"connection_failed", "invalid_response"}:
+                        client.auth_user = None
+                        client.remote_auth_client = None
+                        client.remote_auth_token = ""
+                        return {"authenticated": False, "user": None}
             current = self._auth_store.get(int(user.get("id") or 0))
             if not current or current.get("status") != "approved":
                 if client is not None:
@@ -3982,10 +4840,21 @@ class BackendService:
             return {"authenticated": True, "user": current}
         if command == "auth_list_users":
             self._require_admin(client)
+            if client is not None and getattr(client, "remote_auth_client", None) is not None and getattr(client, "remote_auth_token", ""):
+                return client.remote_auth_client.list_users(client.remote_auth_token)
             return {"items": self._auth_store.list_users()}
         if command in {"auth_approve_user", "auth_reject_user", "auth_disable_user"}:
             self._require_admin(client)
             user_id = self._int_arg(args, "user_id")
+            if client is not None and getattr(client, "remote_auth_client", None) is not None and getattr(client, "remote_auth_token", ""):
+                action = command.removeprefix("auth_")
+                result = client.remote_auth_client.set_status(
+                    action, user_id, client.remote_auth_token,
+                )
+                remote_user = result.get("user") if isinstance(result, Mapping) else None
+                if isinstance(remote_user, Mapping):
+                    self._localize_remote_user(remote_user)
+                return result
             action = {
                 "auth_approve_user": self._auth_store.approve,
                 "auth_reject_user": self._auth_store.reject,
@@ -3995,6 +4864,14 @@ class BackendService:
         if command == "auth_reset_password":
             self._require_admin(client)
             user_id = self._int_arg(args, "user_id")
+            if client is not None and getattr(client, "remote_auth_client", None) is not None and getattr(client, "remote_auth_token", ""):
+                result = client.remote_auth_client.reset_password(
+                    user_id, str(args.get("password") or ""), client.remote_auth_token,
+                )
+                remote_user = result.get("user") if isinstance(result, Mapping) else None
+                if isinstance(remote_user, Mapping):
+                    self._localize_remote_user(remote_user, password=args.get("password"))
+                return result
             return {"user": self._auth_store.reset_password(user_id, args.get("password"))}
         self._authorize_command_scope(command, args, client)
         if command == "status":
@@ -4005,6 +4882,8 @@ class BackendService:
             keyword = str(args.get("keyword") or "").strip()
             if not keyword:
                 raise ValueError("keyword 不能为空")
+            if str(args.get("platform") or "douyin").strip().lower() in _HIDDEN_PLATFORMS:
+                raise ValueError("该平台暂未启用")
             allowed = {
                 "platform", "batch_size", "cooldown_seconds", "collect_mode",
                 "target_count", "collect_types", "task_accounts", "only_with_comments",
@@ -4071,12 +4950,14 @@ class BackendService:
             name = str(args.get("name") or "").strip()
             if not name:
                 raise ValueError("name 不能为空")
+            platform = str(args.get("platform") or "douyin").strip().lower()
+            if platform in _HIDDEN_PLATFORMS:
+                raise ValueError("该平台暂未启用")
             window_id = str(args.get("bb_window_id") or "").strip()
-            if not window_id:
+            if not window_id and platform != "tieba":
                 raise ValueError("请先在 BitBrowser 创建并打开窗口，再选择窗口 ID")
             owner_id = self._owner_user_id(client)
             if owner_id is not None:
-                platform = str(args.get("platform") or "douyin").strip().lower()
                 conn = self._lead_connection()
                 try:
                     existing = conn.execute(
@@ -4090,7 +4971,7 @@ class BackendService:
                     raise self._auth_error_type("forbidden", "该账号或窗口已归属其他员工")
             account_id = scheduler.add_account(
                 name, bb_window_id=window_id,
-                platform=str(args.get("platform") or "douyin"),
+                platform=platform,
             )
             self._set_owner_and_queue("accounts", int(account_id), client, "account")
             return {"account_id": int(account_id)}
@@ -4098,6 +4979,8 @@ class BackendService:
             return self._open_account_browser(args)
         if command == "bind_account":
             return self._bind_account(args)
+        if command == "refresh_account_nicknames":
+            return self._refresh_account_nicknames(client)
         if command == "remove_account":
             account_id = self._int_arg(args, "account_id", required=False)
             account_snapshot = None
@@ -4193,6 +5076,8 @@ class BackendService:
             return self._generate_content(args, client)
         if command == "import_generated_content":
             return self._import_generated_content(args, client)
+        if command == "delete_generated_content":
+            return self._delete_generated_content(args, client)
         if command == "schedule_publish":
             return self._schedule_publish(args, client)
         if command == "list_published_messages":
@@ -4201,6 +5086,8 @@ class BackendService:
             return self._sync_published_messages(args, client)
         if command == "mark_published_message":
             return self._mark_published_message(args)
+        if command == "open_published_message_browser":
+            return self._open_published_message_browser(args)
         if command == "test_llm_api":
             return self._test_llm_api()
         if command == "save_template":
@@ -4211,6 +5098,8 @@ class BackendService:
             return self._run_platform_health()
         if command == "save_settings":
             return self._save_settings(args)
+        if command == "save_tieba_settings":
+            return self._save_tieba_settings(args)
         if command == "inspect_bitbrowser":
             return self._inspect_bitbrowser()
         if command == "run_live_diagnostics":

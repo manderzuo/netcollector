@@ -1665,7 +1665,11 @@ def _fill_script(payload_json: str) -> str:
    const titleTarget = normalizeContent(String(data.title || ''));
    const titleValue = read(titleField);
    const titleLimit = maxLengthOf(titleField);
-   const titleComparable = titleTarget;
+   // 平台输入框可能有真实 maxlength（抖音图文标题当前为 20 字）。
+   // setValue 会按该限制写入；核对时也必须使用同一份页面可接受值，
+   // 否则本地标题较长时会把已经成功填入的内容误判为失败，进而不会进入发布按钮流程。
+   const titleComparable = titleLimit > 0
+     ? titleTarget.slice(0, titleLimit) : titleTarget;
    const bodyTarget = normalizeContent(String(data.body || ''));
    const topicTarget = normalizeContent(topicText);
   const titlePrefixAccepted = Boolean(
@@ -1687,7 +1691,7 @@ def _fill_script(payload_json: str) -> str:
    const actualBody = read(bodyField);
    const actualTopics = topicFields[0] ? read(topicFields[0]) : '';
    const titleMatched = platform === 'weibo' || !titleTarget || (
-     filled.title && titleValue === titleComparable
+     filled.title && (titleValue === titleComparable || titlePrefixAccepted)
    );
    const bodyMatched = !bodyTarget || (filled.body && actualBody === bodyTarget);
    // 没有独立话题控件的平台把话题视为“不适用”；一旦页面提供话题控件，

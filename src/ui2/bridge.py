@@ -38,6 +38,9 @@ class Ui2Bridge:
         self._lead_refresh_pending: dict[str, Any] | None = None
         self._interaction_refresh_inflight = False
         self._interaction_refresh_pending: dict[str, Any] | None = None
+        # 日志事件可能在采集高峰期连续到达。只允许一个日志刷新信号
+        # 同时排队，避免 Qt 事件队列被重复的 ListView 重绘请求塞满。
+        self._log_signal_pending = False
         self._last_interaction_args: dict[str, Any] = {
             "status": "draft", "interaction_type": "comment_reply",
             "page": 1, "page_size": 50,
@@ -74,12 +77,20 @@ class Ui2Bridge:
 
     def _notify_logs(self, payload: Mapping[str, Any]) -> None:
         with self._lock:
+            if self._log_signal_pending:
+                return
+            self._log_signal_pending = True
             listeners = list(self._log_listeners)
         for callback in listeners:
             try:
                 callback(dict(payload))
             except Exception:
                 pass
+
+    def mark_log_signal_delivered(self) -> None:
+        """允许下一条日志再次触发 Qt 刷新信号。"""
+        with self._lock:
+            self._log_signal_pending = False
 
     def _on_backend_event(self, event: Mapping[str, Any]) -> None:
         kind = str(event.get("event") or "")
@@ -330,8 +341,11 @@ class Ui2Bridge:
                 with self._async_lock:
                     pending = self._lead_refresh_pending
                     self._lead_refresh_pending = None
-                    if pending is None:
-                        self._lead_refresh_inflight = False
+                    # 当前 worker 已经结束。无论是否存在 pending 请求，都要
+                    # 先释放 inflight 状态，再启动最后一次查询；否则递归调用
+                    # refresh_leads_async() 会再次命中“已有请求进行中”，导致
+                    # 任务下拉框切换后列表永久停留在旧任务。
+                    self._lead_refresh_inflight = False
                 if pending is not None:
                     self.refresh_leads_async(pending, callback)
 
@@ -383,8 +397,11 @@ class Ui2Bridge:
                 with self._async_lock:
                     pending = self._interaction_refresh_pending
                     self._interaction_refresh_pending = None
-                    if pending is None:
-                        self._interaction_refresh_inflight = False
+                    # 当前 worker 已结束。即使存在待执行的类型/状态切换请求，
+                    # 也必须先释放 inflight，再重新派发 pending；否则从“评论
+                    # 回复”切换到“发私信”时，新的查询会再次被自己拦截，界面
+                    # 就会一直停留在原互动类型。
+                    self._interaction_refresh_inflight = False
                 if pending is not None:
                     self.refresh_interactions_async(pending, callback)
 

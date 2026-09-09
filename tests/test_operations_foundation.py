@@ -201,18 +201,18 @@ class OperationsFoundationTests(unittest.TestCase):
         self.assertEqual(len(latest), 1)
         self.assertEqual(latest[0]["status"], HealthStatus.OK)
 
-    def test_platform_health_check_records_five_platforms(self):
+    def test_platform_health_check_records_all_platforms(self):
         result = PlatformHealthChecker(
             self.conn, clock=lambda: self.clock().isoformat(timespec="seconds")
         ).run()
         self.assertEqual([row["platform"] for row in result["rows"]],
-                         ["douyin", "xhs", "weibo", "bilibili", "kuaishou"])
+                         ["douyin", "xhs", "weibo", "bilibili", "kuaishou", "tieba"])
         self.assertEqual(result["rows"][0]["status"], HealthStatus.OK)
         self.assertEqual(result["rows"][1]["status"], HealthStatus.WARNING)
         events = self.conn.execute(
             "SELECT COUNT(*) FROM health_events WHERE check_name = '基础健康检查'"
         ).fetchone()[0]
-        self.assertEqual(events, 5)
+        self.assertEqual(events, 6)
 
     def test_browser_health_without_bound_accounts_is_read_only(self):
         self.conn.execute("DELETE FROM accounts WHERE id = ?", (self.account_id,))

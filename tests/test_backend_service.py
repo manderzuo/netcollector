@@ -13,7 +13,7 @@ import threading
 import time
 import unittest
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,7 +35,10 @@ from backend_service import BackendService  # noqa: E402
 from interactions.repository import InteractionRepository  # noqa: E402
 from interactions.models import ReplyActionResult  # noqa: E402
 from interactions.private_message import (  # noqa: E402
+    PrivateMessageTarget,
     _private_message_script,
+    _private_page_score,
+    _private_page_state_script,
     _same_page_url,
 )
 from interactions.service import InteractionService  # noqa: E402
@@ -56,6 +59,61 @@ class TestBackendProtocol(unittest.TestCase):
         self.assertIn("private_message_input_probe", script)
         self.assertIn("private_account_not_supported", script)
         self.assertIn("private_account_detected", script)
+        self.assertIn("const privateCandidates = () =>", script)
+        self.assertNotIn(
+            "const all = Array.from(document.querySelectorAll('button,[role=\"button\"],a,span,div'))",
+            script,
+        )
+        self.assertIn("private_message_button_probe", script)
+        self.assertIn("private_message_input_state_probe", script)
+        self.assertIn("private_message_button_clicked', {page:", script)
+
+    def test_private_message_page_selection_avoids_bitbrowser_and_creator_pages(self):
+        target = PrivateMessageTarget(
+            lead_id=1,
+            draft_id=2,
+            platform="douyin",
+            account_id=14,
+            account_name="测试账号",
+            account_status="idle",
+            bb_window_id="window-1",
+            platform_user_id="user-1",
+            nickname="测试用户",
+            profile_url="https://www.douyin.com/user/user-1",
+        )
+        self.assertLess(
+            _private_page_score(
+                {"type": "page", "url": "https://console.bitbrowser.net/?id=window-1"},
+                target,
+            ),
+            -99999,
+        )
+        self.assertLess(
+            _private_page_score(
+                {"type": "page", "url": "https://creator.douyin.com/creator-micro/content/manage"},
+                target,
+            ),
+            -99999,
+        )
+        self.assertGreater(
+            _private_page_score(
+                {"type": "page", "url": target.profile_url}, target
+            ),
+            300,
+        )
+        self.assertGreater(
+            _private_page_score(
+                {"type": "page", "url": "https://www.douyin.com/user/other"},
+                target,
+            ),
+            150,
+        )
+
+    def test_private_message_page_state_script_contains_readiness_signals(self):
+        script = _private_page_state_script()
+        self.assertIn("readyState: document.readyState", script)
+        self.assertIn("privateButtonCount", script)
+        self.assertIn("privateNotice", script)
 
     def test_private_message_target_page_compares_path_not_only_host(self):
         self.assertFalse(_same_page_url(
@@ -136,6 +194,72 @@ class TestBackendService(unittest.TestCase):
             time.sleep(0.02)
         self.assertTrue(any(item.get("event") == "state_snapshot" for item in self._events()))
 
+    def test_refresh_account_nicknames_updates_idle_and_skips_working(self):
+        working_id = self.scheduler.add_account(
+            "工作中账号", bb_window_id="demo-working", platform="douyin"
+        )
+        # 模拟另一个仍存活的调度器持有租约；刷新昵称时才应跳过该账号。
+        # 没有租约的 working 属于旧版本/异常退出残留，会被自动校正为 idle。
+        self.scheduler.conn.execute(
+            "UPDATE accounts SET status = 'working', runtime_owner = ?, "
+            "runtime_heartbeat = ? WHERE id = ?",
+            (f"{os.getpid()}:other-scheduler", datetime.now().isoformat(), working_id),
+        )
+        self.scheduler.conn.commit()
+
+        def fake_bind(args):
+            account_id = int(args["account_id"])
+            db.update_account_nickname(
+                self.scheduler.conn, account_id, f"平台昵称-{account_id}"
+            )
+            return {
+                "account_id": account_id,
+                "nickname": f"平台昵称-{account_id}",
+            }
+
+        with patch.object(self.service, "_bind_account", side_effect=fake_bind) as bind:
+            result = self.client.request("refresh_account_nicknames")
+
+        self.assertEqual(result["updated"], [
+            {"account_id": self.account_id, "nickname": f"平台昵称-{self.account_id}"}
+        ])
+        self.assertEqual(result["skipped"], [
+            {"account_id": working_id, "reason": "账号正在工作，已跳过"}
+        ])
+        self.assertEqual(result["failed"], [])
+        bind.assert_called_once_with({"account_id": self.account_id})
+        row = self.scheduler.conn.execute(
+            "SELECT nickname FROM accounts WHERE id = ?", (self.account_id,)
+        ).fetchone()
+        self.assertEqual(row["nickname"], f"平台昵称-{self.account_id}")
+
+    def test_status_report_keeps_explicit_platform_nickname(self):
+        db.update_account_nickname(self.scheduler.conn, self.account_id, "12345678a")
+        report = self.scheduler.status_report()
+        row = report["accounts"][f"douyin:{self.account_id}"]
+        self.assertEqual(row["nickname"], "12345678a")
+        self.assertTrue(row["nickname_resolved"])
+
+    def test_bind_account_persists_explicit_numeric_platform_nickname(self):
+        ws_path = self.service._account_ws_path("douyin")
+        with open(ws_path, "w", encoding="utf-8") as stream:
+            stream.write("demo-test\nws://127.0.0.1:9222/devtools/browser/test\n")
+        with patch.object(self.service, "_open_account_browser"), patch(
+            "account_reader.read_account",
+            return_value={"logged_in": True, "nick": "1234567899", "uid": "u-14"},
+        ) as reader:
+            result = self.service._bind_account({"account_id": self.account_id})
+        reader.assert_called_once_with(
+            "douyin",
+            "ws://127.0.0.1:9222/devtools/browser/test",
+            expected_uid="测试账号",
+        )
+        self.assertEqual(result["nickname"], "1234567899")
+        row = self.scheduler.conn.execute(
+            "SELECT nickname FROM accounts WHERE id = ?", (self.account_id,)
+        ).fetchone()
+        self.assertEqual(row["nickname"], "1234567899")
+
     def test_authentication_and_admin_approval_flow(self):
         unauthenticated = BackendClient(self.service.endpoint, timeout=3)
         unauthenticated.connect()
@@ -187,8 +311,20 @@ class TestBackendService(unittest.TestCase):
         self.assertFalse(self.client.connected)
         self.client.connect()
         self.assertTrue(self.client.connected)
-        self.client.request("auth_login", {"username": "admin", "password": "abc123"})
+        login = self.client.request("auth_login", {"username": "admin", "password": "abc123"})
         self.assertIn("accounts", self.client.request("status"))
+        self.assertTrue(login.get("local_session_token"))
+
+        restored_client = BackendClient(self.service.endpoint, timeout=3)
+        restored_client.connect()
+        try:
+            restored = restored_client.request("auth_restore", {
+                "local_session_token": login["local_session_token"],
+            })
+            self.assertTrue(restored["authenticated"])
+            self.assertEqual(restored["user"]["username"], "admin")
+        finally:
+            restored_client.close()
 
     def test_create_browser_window_restores_account_setup_flow(self):
         class FakeBitBrowser:
@@ -703,6 +839,61 @@ class TestBackendService(unittest.TestCase):
                 "scheduled_at": "2020-01-01 00:00",
             })
 
+    def test_scheduled_publish_runner_executes_due_authorized_job(self):
+        account_id = self.scheduler.add_account(
+            "定时执行账号", bb_window_id="scheduled-window", platform="xhs"
+        )
+        draft_id = self.client.request("create_publish_draft", {
+            "title": "定时执行标题", "body": "定时执行正文", "platforms": ["xhs"],
+        })["draft_id"]
+        future = (beijing_now() + timedelta(hours=1)).replace(second=0)
+        created = self.client.request("schedule_publish", {
+            "draft_id": draft_id, "platform": "xhs", "account_id": account_id,
+            "scheduled_at": future.strftime("%Y-%m-%d %H:%M"),
+            "editor_title": "定时执行标题", "editor_body": "定时执行正文",
+            "editor_topics": "", "real_send_authorized": True,
+        })
+        job_id = int(created["job_id"])
+        self.assertTrue(created["real_send_authorized"])
+
+        # 通过数据库把计划时间推进到过去，模拟“到点”，不等待真实时钟。
+        due = (beijing_now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+        with self.service._lead_lock:
+            conn = self.service._lead_connection()
+            try:
+                with conn:
+                    conn.execute(
+                        "UPDATE publish_jobs SET scheduled_at = ? WHERE id = ?",
+                        (due, job_id),
+                    )
+            finally:
+                conn.close()
+
+        calls = []
+
+        class FakePublishingBrowserAdapter:
+            def __init__(self, _browser, on_log=None):
+                self.on_log = on_log
+
+            def real_publish(self, **kwargs):
+                calls.append(kwargs)
+                return {
+                    "send_clicked": True,
+                    "submission": {"clicked": True, "label": "发布"},
+                    "message": "已发布",
+                }
+
+        self.scheduler.bb = object()
+        with patch("publishing.browser.PublishingBrowserAdapter", FakePublishingBrowserAdapter):
+            self.assertEqual(self.service.run_scheduled_publish_once(), 1)
+
+        rows = self.client.request("list_publish_drafts")["items"]
+        row = next(item for item in rows if int(item["id"]) == draft_id)
+        self.assertEqual(row["latest_publish_job"]["status"], "published")
+        self.assertEqual(row["latest_publish_job"]["current_step"], "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["title"], "定时执行标题")
+
     def test_send_interactions_marks_per_item_exception_as_failed(self):
         class FailingInteractionService:
             def __init__(self):
@@ -956,6 +1147,74 @@ class TestBackendService(unittest.TestCase):
         self.assertEqual({row["message_type"] for row in messages["items"]}, {"reply", "like"})
         reply = next(row for row in messages["items"] if row["message_type"] == "reply")
         self.assertEqual(reply["quote_content"], "原评论")
+
+    def test_message_center_reply_opens_bound_browser_without_sending(self):
+        class FakeBitBrowser:
+            def __init__(self):
+                self.opened = []
+
+            def open_browser(self, window_id, **kwargs):
+                self.opened.append((window_id, kwargs))
+                return {"ws": "ws://127.0.0.1:9222/devtools/browser/message-test"}
+
+        class FakeCdpSession:
+            navigated = []
+
+            def __init__(self, _ws_url, timeout=30.0):
+                self.timeout = timeout
+
+            async def connect(self):
+                return self
+
+            async def attach_page(self):
+                return "message-page"
+
+            async def navigate(self, url, _session_id, wait_load=True, timeout=25.0):
+                self.navigated.append((url, wait_load, timeout))
+
+            async def close(self):
+                return None
+
+        fake_browser = FakeBitBrowser()
+        self.scheduler.bb = fake_browser
+        payload = {
+            "ok": True,
+            "items": [{
+                "message_id": "m-reply-open",
+                "message_type": "reply",
+                "nickname": "访客",
+                "content": "我想了解一下",
+                "can_reply": True,
+                "source_url": "https://www.douyin.com/video/reply-open",
+            }],
+            "categories": ["interaction"], "errors": [],
+        }
+        with patch("publishing.message_reader.read_account_messages", return_value=payload):
+            self.client.request("sync_published_messages", {
+                "account_id": self.account_id, "platform": "douyin",
+            })
+        messages = self.client.request("list_published_messages", {
+            "account_id": self.account_id, "platform": "douyin",
+        })
+        message_id = int(messages["items"][0]["id"])
+        # 仅测试服务编排，不连接真实 CDP。测试运行时可能未安装
+        # websockets，因此先提供一个占位模块再替换 CdpSession。
+        with patch.dict(sys.modules, {"websockets": object()}):
+            with patch("cdp.CdpSession", FakeCdpSession):
+                result = self.client.request("open_published_message_browser", {
+                    "message_id": message_id,
+                })
+        self.assertTrue(result["opened"])
+        self.assertTrue(result["manual_only"])
+        self.assertEqual(fake_browser.opened[0][0], "demo-test")
+        self.assertEqual(
+            fake_browser.opened[0][1]["new_page_url"],
+            "https://www.douyin.com/video/reply-open",
+        )
+        self.assertEqual(
+            FakeCdpSession.navigated[-1][0],
+            "https://www.douyin.com/video/reply-open",
+        )
 
     def test_real_publish_requires_explicit_second_confirmation(self):
         with self.assertRaises(ValueError):

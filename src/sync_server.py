@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import os
@@ -19,6 +20,11 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Mapping
+
+try:
+    from .auth_store import AuthError, AuthStore  # type: ignore
+except ImportError:  # pragma: no cover - standalone server deployment
+    from auth_store import AuthError, AuthStore  # type: ignore
 
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -33,6 +39,9 @@ class SyncServerStore:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._lock = threading.RLock()
         self._ensure_schema()
+        # 注册、登录和审批与数据同步共用同一个服务端 SQLite 文件，但使用
+        # 独立的认证会话表；密码仍由 AuthStore 负责 PBKDF2 哈希保存。
+        self.auth_store = AuthStore(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
@@ -62,7 +71,74 @@ class SyncServerStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_employee_sync_owner
                       ON employee_sync_changes(owner_user_id, id);
+                    CREATE TABLE IF NOT EXISTS collector_auth_sessions (
+                      token_hash TEXT PRIMARY KEY,
+                      user_id INTEGER NOT NULL,
+                      created_at TEXT NOT NULL,
+                      last_seen_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_collector_auth_session_user
+                      ON collector_auth_sessions(user_id);
                     """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+    def create_auth_session(self, user_id: int) -> str:
+        token = secrets.token_urlsafe(32)
+        stamp = ""  # 由 SQLite 生成同一时区的可读时间，避免服务端时区差异。
+        with self._lock:
+            conn = self._connect()
+            try:
+                stamp = conn.execute("SELECT datetime('now','localtime')").fetchone()[0]
+                conn.execute(
+                    "INSERT INTO collector_auth_sessions "
+                    "(token_hash, user_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)",
+                    (self._token_hash(token), int(user_id), stamp, stamp),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        return token
+
+    def auth_user_for_token(self, token: str) -> dict[str, Any] | None:
+        token = str(token or "").strip()
+        if not token:
+            return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT user_id FROM collector_auth_sessions WHERE token_hash = ?",
+                    (self._token_hash(token),),
+                ).fetchone()
+                if row is None:
+                    return None
+                user = self.auth_store.get(int(row["user_id"]))
+                if not user or user.get("status") != "approved":
+                    return None
+                stamp = conn.execute("SELECT datetime('now','localtime')").fetchone()[0]
+                conn.execute(
+                    "UPDATE collector_auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+                    (stamp, self._token_hash(token)),
+                )
+                conn.commit()
+                return user
+            finally:
+                conn.close()
+
+    def revoke_auth_session(self, token: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    "DELETE FROM collector_auth_sessions WHERE token_hash = ?",
+                    (self._token_hash(str(token or "").strip()),),
                 )
                 conn.commit()
             finally:
@@ -161,14 +237,113 @@ class _SyncRequestHandler(BaseHTTPRequestHandler):
         expected = "Bearer " + self.server.api_token
         return bool(self.server.api_token) and hmac.compare_digest(supplied, expected)
 
+    def _auth_token(self) -> str:
+        supplied = str(self.headers.get("Authorization") or "").strip()
+        if supplied.lower().startswith("bearer "):
+            return supplied[7:].strip()
+        return ""
+
+    def _read_json(self) -> Mapping[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0 or length > MAX_BODY_BYTES:
+            raise ValueError("请求大小无效")
+        body = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(body, Mapping):
+            raise ValueError("请求必须是 JSON 对象")
+        return body
+
+    def _handle_auth(self, action: str) -> None:
+        try:
+            body = self._read_json()
+            store = self.server.store
+            if action == "register":
+                user = store.auth_store.register(
+                    body.get("username"), body.get("password"), body.get("employee_name")
+                )
+                self._json(HTTPStatus.OK, {"ok": True, "user": user})
+                return
+            if action == "login":
+                user = store.auth_store.authenticate(body.get("username"), body.get("password"))
+                session_token = store.create_auth_session(int(user["id"]))
+                self._json(HTTPStatus.OK, {
+                    "ok": True, "authenticated": True, "user": user,
+                    "session_token": session_token,
+                })
+                return
+
+            token = self._auth_token()
+            user = store.auth_user_for_token(token)
+            if not user:
+                self._json(HTTPStatus.UNAUTHORIZED, {
+                    "ok": False, "code": "auth_required", "message": "统一账号服务登录已失效，请重新登录",
+                })
+                return
+            if action == "me":
+                self._json(HTTPStatus.OK, {"ok": True, "authenticated": True, "user": user})
+                return
+            if action == "logout":
+                store.revoke_auth_session(token)
+                self._json(HTTPStatus.OK, {"ok": True, "authenticated": False})
+                return
+            if user.get("role") != "admin":
+                self._json(HTTPStatus.FORBIDDEN, {
+                    "ok": False, "code": "forbidden", "message": "只有管理员可以执行此操作",
+                })
+                return
+            if action == "list_users":
+                self._json(HTTPStatus.OK, {"ok": True, "items": store.auth_store.list_users()})
+                return
+            if action in {"approve_user", "reject_user", "disable_user"}:
+                user_id = int(body.get("user_id") or 0)
+                operation = {
+                    "approve_user": store.auth_store.approve,
+                    "reject_user": store.auth_store.reject,
+                    "disable_user": store.auth_store.disable,
+                }[action]
+                self._json(HTTPStatus.OK, {"ok": True, "user": operation(user_id)})
+                return
+            if action == "reset_password":
+                user_id = int(body.get("user_id") or 0)
+                self._json(HTTPStatus.OK, {
+                    "ok": True,
+                    "user": store.auth_store.reset_password(user_id, body.get("password")),
+                })
+                return
+            self._json(HTTPStatus.NOT_FOUND, {
+                "ok": False, "code": "not_found", "message": "认证接口不存在",
+            })
+        except AuthError as exc:
+            status = HTTPStatus.UNAUTHORIZED if exc.code in {
+                "invalid_credentials", "account_pending", "account_rejected", "account_disabled",
+            } else HTTPStatus.BAD_REQUEST
+            self._json(status, {"ok": False, "code": exc.code, "message": exc.message})
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False, "code": "invalid_request", "message": str(exc),
+            })
+        except Exception:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {
+                "ok": False, "code": "server_error", "message": "统一账号服务内部错误",
+            })
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/collector/health":
             self._json(HTTPStatus.OK, {"ok": True, "service": "employee-sync"})
             return
+        if self.path == "/api/collector/auth/health":
+            self._json(HTTPStatus.OK, {"ok": True, "service": "collector-auth"})
+            return
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "message": "接口不存在"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/api/collector/sync":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path.startswith("/api/collector/auth/"):
+            self._handle_auth(path.rsplit("/", 1)[-1])
+            return
+        if path != "/api/collector/sync":
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "message": "接口不存在"})
             return
         if not self._authorized():

@@ -55,6 +55,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 
 DEFAULT_COLLECT_TYPES = [
     "video_info", "author_info", "engagement", "comments", "comment_user", "region", "intent"
@@ -62,13 +63,24 @@ DEFAULT_COLLECT_TYPES = [
 
 try:  # 包方式导入：import src.scheduler
     from . import db  # type: ignore
+    from .account_reader import looks_like_account_key  # type: ignore
     from .search_sort import sort_label  # type: ignore
 except ImportError:  # 脚本方式导入：python src/demo.py（src 在 sys.path）
     import db  # type: ignore
+    from account_reader import looks_like_account_key  # type: ignore
     from search_sort import sort_label  # type: ignore
 
 
-__all__ = ["Scheduler", "Collector", "FakeCollector", "HumanInterventionRequired"]
+__all__ = [
+    "Scheduler", "Collector", "FakeCollector", "HumanInterventionRequired",
+    "TaskCancelled", "TaskPaused",
+]
+
+# 账号状态中的 working/cooldown 必须带有当前进程租约。没有活动线程、
+# 没有存活租约的状态只能是上次异常退出留下的残留，启动和状态轮询时会校正为 idle。
+_RUNTIME_ACCOUNT_STATUSES = frozenset({"working", "cooldown"})
+_RUNTIME_HEARTBEAT_INTERVAL = 2.0
+_RUNTIME_LEASE_TIMEOUT = 15.0
 
 # 账号表允许本调度器直接写入的列（契约 DDL 核心字段，白名单防手滑）
 _ACCT_WRITABLE = {
@@ -106,6 +118,10 @@ class HumanInterventionRequired(Exception):
 
 class TaskCancelled(Exception):
     """任务在耗时搜索/预取阶段被用户停止。"""
+
+
+class TaskPaused(Exception):
+    """任务被用户暂停；与停止不同，断点和任务暂停状态都要保留。"""
 
 
 class Collector:
@@ -240,6 +256,13 @@ class Scheduler:
         self._log_path = os.path.join(
             os.path.dirname(os.path.abspath(db_path)), "logs", "scheduler.log"
         )
+        # 运行租约用于跨进程区分“当前仍在采集”和“上次进程异常退出后的残留”。
+        # 同一进程内即使意外创建了两个 Scheduler，也会使用各自租约，避免
+        # 一个实例关闭时误清理另一个实例正在使用的账号。
+        self._runtime_owner = f"{os.getpid()}:{uuid.uuid4().hex}"
+        self._runtime_heartbeat_stop = threading.Event()
+        self._runtime_heartbeat_thread = None
+        self._runtime_heartbeat_guard = threading.Lock()
 
         self._lock = threading.RLock()       # 保护以下线程共享状态
         # 共享 this.conn 的串行化锁：self.conn 是 Scheduler 单例共享连接（check_same_thread=False），
@@ -254,11 +277,13 @@ class Scheduler:
         # 不再是一个全局暂停事件影响所有任务。
         self._pause_evts: dict = {}          # task_id -> threading.Event
         self._task_stop_evts: dict = {}      # task_id -> Event：按任务停止信号
+        self._pause_release_evts: dict = {}  # task_id -> Event：暂停时释放账号并退出旧 worker
         self._global_paused = False          # 无参 pause() = 全局暂停(含未来新任务)
         self._worker_threads: dict = {}      # account_id -> Thread
         self._worker_task: dict = {}         # account_id -> task_id（worker 归属任务）
         self._task_threads: dict = {}        # task_id -> [Thread]
         self._phase_threads: dict = {}       # task_id -> 阶段 A 搜索线程，避免继续时重复启动
+        self._phase_account_by_task: dict = {}  # task_id -> 阶段 A 当前占用的账号 id
         self._supervisors: dict = {}         # task_id -> Thread
         self._done_events: dict = {}         # task_id -> Event（wait_for_task 等待）
         self._cd_events: dict = {}           # account_id -> Event（冷却可取消等待）
@@ -278,6 +303,12 @@ class Scheduler:
         self._monitor_runner = None
         self._waiting_restart_inflight = False
         self._closed = False
+        # 进程启动时先修正旧版本/异常退出留下的工作状态。只清理没有
+        # 活动线程且租约已经失效的 working/cooldown，不触碰任务、作品、评论。
+        self._reconcile_stale_account_states()
+        # 任务状态也会跨 GUI 重启持久化；没有线程跟随进程恢复时，
+        # 采集中状态必须落成可续跑的暂停，而不能继续显示假运行。
+        self._reconcile_stale_task_states()
 
     def _emit_log(self, message: str) -> None:
         """统一输出后台日志，同时持久化，便于复盘阶段切换和停止原因。"""
@@ -486,7 +517,261 @@ class Scheduler:
         conn.execute(f"UPDATE accounts SET {sets} WHERE id = ?", (*cols.values(), account_id))
 
     def _acct_status(self, conn, account_id: int, status: str):
+        """写入账号状态，并同步维护当前调度器的运行租约。"""
+        account_id = int(account_id)
+        if status in _RUNTIME_ACCOUNT_STATUSES:
+            conn.execute(
+                "UPDATE accounts SET status = ?, runtime_owner = ?, "
+                "runtime_heartbeat = ?, wait_reason = NULL, wait_since = NULL "
+                "WHERE id = ?",
+                (status, self._runtime_owner, _now_iso(), account_id),
+            )
+            conn.commit()
+            self._ensure_runtime_heartbeat()
+            return
+        if status == "idle":
+            # 只有 worker/搜索阶段真正退出后才会走到这里；清理冷却和租约，
+            # 使账号可以马上被其它任务领取。
+            conn.execute(
+                "UPDATE accounts SET status = 'idle', cd_until = NULL, "
+                "wait_reason = NULL, wait_since = NULL, runtime_owner = NULL, "
+                "runtime_heartbeat = NULL WHERE id = ?",
+                (account_id,),
+            )
+            conn.commit()
+            return
+        if status in ("waiting_human", "frozen", "dead"):
+            conn.execute(
+                "UPDATE accounts SET status = ?, runtime_owner = NULL, "
+                "runtime_heartbeat = NULL WHERE id = ?",
+                (status, account_id),
+            )
+            conn.commit()
+            return
         db.update_account_status(conn, account_id, status)
+
+    def _ensure_runtime_heartbeat(self) -> None:
+        """懒启动本调度器的账号租约心跳线程。"""
+        with self._runtime_heartbeat_guard:
+            current = self._runtime_heartbeat_thread
+            if current is not None and current.is_alive():
+                return
+            if self._closed:
+                return
+            self._runtime_heartbeat_stop.clear()
+            thread = threading.Thread(
+                target=self._runtime_heartbeat_loop,
+                name="scheduler-account-heartbeat",
+                daemon=True,
+            )
+            self._runtime_heartbeat_thread = thread
+            thread.start()
+
+    def _runtime_heartbeat_loop(self) -> None:
+        """周期刷新当前进程持有的账号租约，防止长耗时浏览器操作被误清理。"""
+        while not self._runtime_heartbeat_stop.wait(_RUNTIME_HEARTBEAT_INTERVAL):
+            try:
+                with self._ctl_lock:
+                    self.ctl.execute(
+                        "UPDATE accounts SET runtime_heartbeat = ? "
+                        "WHERE runtime_owner = ? AND status IN ('working','cooldown')",
+                        (_now_iso(), self._runtime_owner),
+                    )
+                    self.ctl.commit()
+            except (sqlite3.Error, RuntimeError):
+                # 关闭阶段连接可能已经释放；心跳不能影响采集和退出流程。
+                pass
+
+    @staticmethod
+    def _process_alive(pid: int) -> bool:
+        """仅用标准库检查租约进程是否仍存在，兼容 Windows/Python。"""
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @classmethod
+    def _runtime_lease_alive(cls, owner, heartbeat) -> bool:
+        """判断数据库里的账号租约是否仍可能属于存活进程。"""
+        if not owner or not heartbeat:
+            return False
+        try:
+            pid = int(str(owner).split(":", 1)[0])
+        except (TypeError, ValueError):
+            return False
+        heartbeat_at = _iso_to_dt(heartbeat)
+        if heartbeat_at is None:
+            return False
+        age = (datetime.datetime.now() - heartbeat_at).total_seconds()
+        return age <= _RUNTIME_LEASE_TIMEOUT and cls._process_alive(pid)
+
+    def _reconcile_stale_account_states(self) -> dict:
+        """清理没有活动线程/有效租约的 working、cooldown 残留状态。
+
+        账号状态是跨 GUI 重启持久化的，但线程和调度器内存态不会持久化。
+        因此不能只看数据库里的 status：正常运行的其它进程有新鲜租约时保留，
+        上次异常退出或旧版本未写租约时恢复 idle。返回值供启动日志和测试使用。
+        """
+        cleared = []
+        with self._conn_lock, self._lock:
+            rows = self.conn.execute(
+                "SELECT id, name, status, runtime_owner, runtime_heartbeat "
+                "FROM accounts WHERE status IN ('working','cooldown') ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                account_id = int(row["id"])
+                if self._thread_alive(account_id):
+                    continue
+                # 当前调度器拥有的租约没有活动线程时，内存态是更强的真源；
+                # 不能因为心跳线程还活着而把已经结束的账号继续显示为 working。
+                if (str(row["runtime_owner"] or "") != self._runtime_owner and
+                        self._runtime_lease_alive(row["runtime_owner"], row["runtime_heartbeat"])):
+                    continue
+                cur = self.conn.execute(
+                    "UPDATE accounts SET status = 'idle', cd_until = NULL, "
+                    "wait_reason = NULL, wait_since = NULL, runtime_owner = NULL, "
+                    "runtime_heartbeat = NULL "
+                    "WHERE id = ? AND status IN ('working','cooldown')",
+                    (account_id,),
+                )
+                if cur.rowcount:
+                    cleared.append({
+                        "account_id": account_id,
+                        "name": str(row["name"] or ""),
+                        "from_status": str(row["status"] or ""),
+                    })
+            if cleared:
+                self.conn.commit()
+        for item in cleared:
+            self._emit_log(
+                f"[scheduler] 启动状态校正：账号#{item['account_id']} "
+                f"{item['from_status']} → idle（未发现活动采集线程或有效租约）"
+            )
+        return {"cleared": cleared}
+
+    def _reconcile_stale_task_states(self) -> dict:
+        """将重启后无活动线程的采集中任务恢复为可继续的暂停态。"""
+        stale = []
+        runtime_statuses = {"phase_a_search", "phase_b_comments", "running"}
+        with self._conn_lock, self._lock:
+            task_rows = self.conn.execute(
+                "SELECT * FROM tasks WHERE status IN "
+                "('phase_a_search','phase_b_comments','running') ORDER BY id"
+            ).fetchall()
+            for raw_task in task_rows:
+                task = self._r(raw_task)
+                task_id = int(task.get("id") or 0)
+                if not task_id:
+                    continue
+                if (
+                    any(thread.is_alive() for thread in self._task_threads.get(task_id, []))
+                    or (self._phase_threads.get(task_id) is not None
+                        and self._phase_threads[task_id].is_alive())
+                    or (self._supervisors.get(task_id) is not None
+                        and self._supervisors[task_id].is_alive())
+                ):
+                    continue
+
+                bound_names = task.get("task_accounts") or "[]"
+                if isinstance(bound_names, str):
+                    try:
+                        bound_names = _json.loads(bound_names)
+                    except (TypeError, ValueError):
+                        bound_names = []
+                if not isinstance(bound_names, list):
+                    bound_names = []
+                names = {str(item).strip() for item in bound_names if str(item).strip()}
+                assigned_rows = self.conn.execute(
+                    "SELECT DISTINCT assigned_account FROM videos "
+                    "WHERE task_id = ? AND assigned_account IS NOT NULL",
+                    (task_id,),
+                ).fetchall()
+                names.update(
+                    str(row["assigned_account"] or "").strip()
+                    for row in assigned_rows if str(row["assigned_account"] or "").strip()
+                )
+                running_run = self.conn.execute(
+                    "SELECT run_id, account_id FROM collection_runs WHERE task_id = ? "
+                    "AND status = 'running' ORDER BY started_at DESC LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                account_rows = self.conn.execute(
+                    "SELECT id, name, status, runtime_owner, runtime_heartbeat, wait_reason "
+                    "FROM accounts WHERE platform = ?",
+                    (str(task.get("platform") or "douyin"),),
+                ).fetchall()
+                if names:
+                    relevant = [
+                        row for row in account_rows
+                        if str(row["name"] or "") in names
+                    ]
+                elif running_run and running_run["account_id"]:
+                    relevant = [
+                        row for row in account_rows
+                        if int(row["id"] or 0) == int(running_run["account_id"])
+                    ]
+                else:
+                    # 无绑定账号且运行记录未记录账号时，无法证明是其它进程
+                    # 的新鲜任务租约；按异常退出恢复为暂停更安全。
+                    relevant = []
+                active_lease = any(
+                    str(row["status"] or "") in runtime_statuses
+                    and str(row["runtime_owner"] or "") != self._runtime_owner
+                    and self._runtime_lease_alive(
+                        row["runtime_owner"], row["runtime_heartbeat"]
+                    )
+                    for row in relevant
+                )
+                if active_lease:
+                    continue
+
+                human_reason = next(
+                    (
+                        str(row["wait_reason"] or "").strip()
+                        for row in relevant
+                        if str(row["status"] or "") == "waiting_human"
+                        and str(row["wait_reason"] or "").strip()
+                    ),
+                    "",
+                )
+                previous_status = str(task.get("status") or "")
+                reason = (
+                    f"需要人工验证：{human_reason}"
+                    if human_reason else
+                    f"应用异常退出：上次处于{previous_status}，已暂停，可点击继续"
+                )
+                db.update_task_status(self.conn, task_id, "paused", reason)
+                run = running_run
+                if run:
+                    self.conn.execute(
+                        "UPDATE collection_runs SET status = 'paused', finished_at = ?, "
+                        "stop_reason = ? WHERE run_id = ? AND status = 'running'",
+                        (_now_iso(), reason, str(run["run_id"])),
+                    )
+                if previous_status == "phase_a_search":
+                    self.conn.execute(
+                        "UPDATE task_search_queries SET status = 'incomplete', updated_at = ? "
+                        "WHERE task_id = ? AND status = 'in_progress'",
+                        (_now_iso(), task_id),
+                    )
+                stale.append({
+                    "task_id": task_id,
+                    "from_status": previous_status,
+                    "reason": reason,
+                })
+            if stale:
+                self.conn.commit()
+        for item in stale:
+            self._emit_log(
+                f"[scheduler] 启动状态校正：任务#{item['task_id']} "
+                f"{item['from_status']} → paused（{item['reason']}）"
+            )
+        return {"cleared": stale}
 
     def _account_safety_decision(self, conn, account_id: int, account_name: str,
                                  operation: str = "collect"):
@@ -581,6 +866,15 @@ class Scheduler:
     def _all_accounts(self):
         cur = self.conn.execute("SELECT * FROM accounts ORDER BY id")
         return [self._r(r) for r in cur.fetchall()]
+
+    @staticmethod
+    def _account_matches_bound_name(account: dict, bound_names) -> bool:
+        """兼容旧任务：绑定值可能是内部标识，也可能是旧版平台昵称。"""
+        values = {
+            str(account.get("name") or "").strip(),
+            str(account.get("nickname") or "").strip(),
+        }
+        return bool(values.intersection({str(item or "").strip() for item in bound_names}))
 
     def _all_tasks(self):
         cur = self.conn.execute("SELECT * FROM tasks ORDER BY id")
@@ -777,7 +1071,7 @@ class Scheduler:
                         bound_names = []
                 candidates = [a for a in self._all_accounts()
                               if (a.get("platform") or "douyin") == task["platform"]
-                              and (not bound_names or a.get("name") in bound_names)
+                              and (not bound_names or self._account_matches_bound_name(a, bound_names))
                               and (self.bb is None or not self._is_demo_account(a))
                               and a.get("status") not in ("waiting_human", "dead", "cooldown")
                               and not self._thread_alive(a["id"])
@@ -787,11 +1081,13 @@ class Scheduler:
                     candidates.sort(key=lambda a: 0 if int(a.get("id", -1)) == int(preferred_id) else 1)
                 search_account = candidates[0] if candidates else None
                 if search_account:
+                    self._phase_account_by_task[int(task_id)] = int(search_account["id"])
+                    self._acct_status(self.conn, int(search_account["id"]), "working")
                     self._update_collection_run(task_id, account_id=int(search_account["id"]))
                 if search_account is None:
                     any_account = any(
                         (a.get("platform") or "douyin") == task["platform"]
-                        and (not bound_names or a.get("name") in bound_names)
+                        and (not bound_names or self._account_matches_bound_name(a, bound_names))
                         and (self.bb is None or not self._is_demo_account(a))
                         for a in self._all_accounts()
                     )
@@ -843,8 +1139,7 @@ class Scheduler:
                     continue
                 if status == "no_more":
                     continue
-                if not self._wait_if_paused(task_id):
-                    raise TaskCancelled()
+                self._raise_for_task_control(task_id)
                 remaining_target = max(1, query_target - existing_count)
                 # 标记当前关键词正在处理。暂停、人工接管、进程重启或异常退出时，
                 # 该状态不会被当作完成；恢复时必须回到这个关键词继续搜索。
@@ -863,8 +1158,7 @@ class Scheduler:
 
                 if only_with_comments and callable(comment_collector):
                     def _on_prefetched_item(item):
-                        if not self._wait_if_paused(task_id):
-                            raise TaskCancelled()
+                        self._raise_for_task_control(task_id)
                         with self._conn_lock:
                             if self._task_query_count(task_id, query) >= query_target:
                                 return
@@ -925,6 +1219,11 @@ class Scheduler:
                         **self._control_kwargs(self.collector.search, task_id, search_sort=selected_sort),
                     )
                     results = [] if raw_results is None else raw_results
+
+                if self._task_stop_requested(task_id):
+                    if self._pause_release_requested(task_id):
+                        raise TaskPaused()
+                    raise TaskCancelled()
 
                 # 如果采集器在暂停窗口内返回了部分结果，当前关键词不能被视为
                 # 已完成；即使返回对象带有默认的 search_complete，也必须回到
@@ -1030,6 +1329,9 @@ class Scheduler:
                 "现在统一进入详情采集和账号均分"
             )
             return True
+        except TaskPaused:
+            self._mark_task_paused(task_id, "用户暂停，已保留当前关键词和作品断点")
+            return False
         except TaskCancelled:
             self._update_collection_run(task_id, status="cancelled", stop_reason="用户停止")
             with self._conn_lock, self._lock:
@@ -1053,6 +1355,8 @@ class Scheduler:
                 self._task_status[task_id] = "failed"
             self._emit_log(f"[scheduler] 任务 {task_id} 关键词组搜索失败：{detail}")
             return False
+        finally:
+            self._release_phase_account(task_id)
 
     def _account_todo(self, task_id: int, account: dict) -> int:
         cur = self.conn.execute(
@@ -1079,7 +1383,8 @@ class Scheduler:
         accounts = [a for a in self._all_accounts()
                     if (a.get("platform") or "douyin") == task.get("platform")]
         if bound_names:
-            allowed = {a.get("name") for a in accounts if a.get("name") in bound_names}
+            allowed = {a.get("name") for a in accounts
+                       if self._account_matches_bound_name(a, bound_names)}
         else:
             allowed = {a.get("name") for a in accounts}
 
@@ -1104,7 +1409,71 @@ class Scheduler:
 
     def _thread_alive(self, account_id: int) -> bool:
         t = self._worker_threads.get(account_id)
-        return t is not None and t.is_alive()
+        if t is not None and t.is_alive():
+            return True
+        # 阶段 A 搜索也会占用账号窗口。旧实现只登记阶段线程，未登记
+        # 搜索账号，导致另一个任务可能同时领取同一个浏览器窗口。
+        for task_id, owner_id in list(self._phase_account_by_task.items()):
+            if int(owner_id) != int(account_id):
+                continue
+            phase = self._phase_threads.get(task_id)
+            if phase is not None and phase.is_alive():
+                return True
+        return False
+
+    def _release_phase_account(self, task_id: int) -> None:
+        """释放阶段 A 搜索占用的账号；人工冻结时保留 waiting_human。"""
+        with self._conn_lock, self._lock:
+            task_id = int(task_id)
+            account_id = self._phase_account_by_task.get(task_id)
+            if account_id is None or account_id in self._waiting_accounts:
+                if account_id is not None and account_id in self._waiting_accounts:
+                    self._phase_account_by_task.pop(task_id, None)
+                return
+            # 释放前再次确认没有阶段/worker 仍持有该账号，避免并发任务误清理。
+            # 当前线程正在执行 finally 时，_thread_alive() 仍会看到自己；
+            # 这里需要把“当前阶段线程”排除，否则阶段 A 永远无法释放账号。
+            current_phase = self._phase_threads.get(task_id)
+            current_is_phase = current_phase is threading.current_thread()
+            if self._thread_alive(account_id) and not current_is_phase:
+                return
+            self._phase_account_by_task.pop(task_id, None)
+            self._acct_status(self.conn, account_id, "idle")
+
+    def _pause_release_requested(self, task_id: int) -> bool:
+        with self._lock:
+            evt = self._pause_release_evts.get(int(task_id))
+            return bool(evt is not None and evt.is_set())
+
+    def _task_stop_requested(self, task_id: int) -> bool:
+        with self._lock:
+            evt = self._task_stop_evts.get(int(task_id))
+            return bool(evt is not None and evt.is_set())
+
+    def _raise_for_task_control(self, task_id: int) -> None:
+        """在搜索/预取回调中把暂停和停止分成两条可恢复路径。"""
+        if self._wait_if_paused(task_id):
+            return
+        if self._pause_release_requested(task_id):
+            raise TaskPaused()
+        raise TaskCancelled()
+
+    def _mark_task_paused(self, task_id: int, detail: str = "用户暂停") -> None:
+        """统一持久化暂停状态，并把正在处理的关键词退回可恢复状态。"""
+        with self._conn_lock, self._lock:
+            current = self.conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (int(task_id),)
+            ).fetchone()
+            if not current or current["status"] in ("done", "aborted", "failed"):
+                return
+            self.conn.execute(
+                "UPDATE task_search_queries SET status = 'incomplete', updated_at = ? "
+                "WHERE task_id = ? AND status = 'in_progress'",
+                (db._now_iso(), int(task_id)),
+            )
+            db.update_task_status(self.conn, int(task_id), "paused", detail)
+            self._task_status[int(task_id)] = "paused"
+        self._update_collection_run(int(task_id), status="paused", stop_reason=detail)
 
     def _is_waiting(self, account_id: int) -> bool:
         with self._lock:
@@ -1236,8 +1605,10 @@ class Scheduler:
                 # 误把已删除任务当成仍存在的任务。
                 self._pause_evts.pop(task_id, None)
                 self._task_stop_evts.pop(task_id, None)
+                self._pause_release_evts.pop(task_id, None)
                 self._task_threads.pop(task_id, None)
                 self._phase_threads.pop(task_id, None)
+                self._phase_account_by_task.pop(task_id, None)
                 self._supervisors.pop(task_id, None)
                 self._done_events.pop(task_id, None)
                 self._resume_account_by_task.pop(task_id, None)
@@ -1253,9 +1624,10 @@ class Scheduler:
         with self._conn_lock, self._lock:
             return self._r(db.get_task(self.conn, task_id))
 
-    def add_account(self, name: str, bb_window_id=None, platform: str = "douyin") -> int:
+    def add_account(self, name: str, bb_window_id=None, platform: str = "douyin",
+                    nickname: str = None) -> int:
         with self._conn_lock:
-            return db.upsert_account(self.conn, name, bb_window_id, platform)
+            return db.upsert_account(self.conn, name, bb_window_id, platform, nickname)
 
     def remove_account(self, name: str = None, account_id: int = None,
                        platform: str = None) -> bool:
@@ -1424,6 +1796,7 @@ class Scheduler:
             start_phase_a = False
 
         if start_phase_a and not is_keyword_group:
+            search_account = None
             try:
                 with self._conn_lock, self._lock:
                     bound_names = task.get("task_accounts") or "[]"
@@ -1434,7 +1807,7 @@ class Scheduler:
                             bound_names = []
                     candidates = [a for a in self._all_accounts()
                                   if (a.get("platform") or "douyin") == task["platform"]
-                                  and (not bound_names or a.get("name") in bound_names)
+                                  and (not bound_names or self._account_matches_bound_name(a, bound_names))
                                   and (self.bb is None or not self._is_demo_account(a))
                                   and a.get("status") not in ("waiting_human", "dead", "cooldown")
                                   and not self._thread_alive(a["id"])
@@ -1444,11 +1817,15 @@ class Scheduler:
                         candidates.sort(key=lambda a: 0 if int(a.get("id", -1)) == int(preferred_id) else 1)
                     search_account = candidates[0] if candidates else None
                     if search_account:
+                        # 阶段 A 同样独占一个账号窗口。没有这条登记时，
+                        # 其它任务会把同一个账号误判为空闲并同时使用。
+                        self._phase_account_by_task[int(task_id)] = int(search_account["id"])
+                        self._acct_status(self.conn, int(search_account["id"]), "working")
                         self._update_collection_run(task_id, account_id=int(search_account["id"]))
                     if search_account is None:
                         any_account = any(
                             (a.get("platform") or "douyin") == task["platform"]
-                            and (not bound_names or a.get("name") in bound_names)
+                            and (not bound_names or self._account_matches_bound_name(a, bound_names))
                             and (self.bb is None or not self._is_demo_account(a))
                             for a in self._all_accounts()
                         )
@@ -1491,8 +1868,7 @@ class Scheduler:
                     def _on_prefetched_item(item):
                         # 微博/B站阶段 A 也支持按任务暂停；继续时由原采集线程
                         # 从这里恢复，避免重新打开搜索页面。
-                        if not self._wait_if_paused(task_id):
-                            raise TaskCancelled()
+                        self._raise_for_task_control(task_id)
                         with self._conn_lock:
                             if self._task_done_count(task_id) >= target_count:
                                 return
@@ -1564,6 +1940,10 @@ class Scheduler:
                     # 保留 SearchVideosResult 的终止元数据；不能用
                     # ``raw_results or []``，否则空结果会丢掉“确认无更多”的状态。
                     results = [] if raw_results is None else raw_results
+                if self._task_stop_requested(task_id):
+                    if self._pause_release_requested(task_id):
+                        raise TaskPaused()
+                    raise TaskCancelled()
                 search_complete = bool(getattr(results, "search_complete", True))
                 if search_meta is not None:
                     search_complete = bool(search_meta.get("search_complete", search_complete))
@@ -1633,6 +2013,9 @@ class Scheduler:
                 with self._lock:
                     if self._phase_threads.get(task_id) is threading.current_thread():
                         self._phase_threads.pop(task_id, None)
+            except TaskPaused:
+                self._mark_task_paused(task_id, "用户暂停，已保留搜索结果和作品断点")
+                return task_id
             except TaskCancelled:
                 self._update_collection_run(task_id, status="cancelled", stop_reason="用户停止")
                 with self._conn_lock, self._lock:
@@ -1667,6 +2050,7 @@ class Scheduler:
                 with self._lock:
                     if self._phase_threads.get(task_id) is threading.current_thread():
                         self._phase_threads.pop(task_id, None)
+                self._release_phase_account(task_id)
             # 用户可能在耗时搜索期间点击停止。不得继续落库或覆盖 aborted 终态。
             if self._task_stop_evts.get(task_id, threading.Event()).is_set():
                 with self._conn_lock, self._lock:
@@ -1752,7 +2136,8 @@ class Scheduler:
                 except Exception:
                     bound_names = []
             if bound_names:
-                accounts = [a for a in accounts if a.get("name") in bound_names]
+                accounts = [a for a in accounts
+                            if self._account_matches_bound_name(a, bound_names)]
             if not accounts:
                 self._emit_log(f"[scheduler] 警告：任务 {task_id} 无可用账号，无法进入阶段 B")
                 db.update_task_status(self.conn, task_id, "no_account")
@@ -1820,9 +2205,20 @@ class Scheduler:
                         name=f"worker-{acc['name']}",
                         daemon=True,
                     )
-                    th.start()
+                    # 先登记归属，再启动线程。旧顺序在短任务中可能出现：
+                    # worker 已经结束，但登记代码随后又把一个已结束线程写回表，
+                    # 造成账号一直被误判为 working。
                     self._worker_threads[acc["id"]] = th
                     self._worker_task[acc["id"]] = task_id
+                    try:
+                        th.start()
+                    except BaseException:
+                        if self._worker_threads.get(acc["id"]) is th:
+                            self._worker_threads.pop(acc["id"], None)
+                        if self._worker_task.get(acc["id"]) == task_id:
+                            self._worker_task.pop(acc["id"], None)
+                        self._acct_status(self.conn, acc["id"], "idle")
+                        raise
                     spawned.append(th)
             if spawned:
                 self._task_threads.setdefault(task_id, []).extend(spawned)
@@ -1876,13 +2272,41 @@ class Scheduler:
                 with self._lock:
                     alive = [t for t in self._task_threads.get(task_id, []) if t.is_alive()]
                 if not alive:
+                    pause_release = self._pause_release_requested(task_id)
                     with self._ctl_lock:
                         left = self._task_video_left_ctl(task_id)  # 后台线程：走 self.ctl
-                        target = self._r(self.ctl.execute(
-                            "SELECT target_count FROM tasks WHERE id = ?", (task_id,)
-                        ).fetchone()).get("target_count", 100)
+                        task_row = self._r(self.ctl.execute(
+                            "SELECT status, target_count FROM tasks WHERE id = ?", (task_id,)
+                        ).fetchone())
+                        task_state = str(task_row.get("status") or "")
+                        target = task_row.get("target_count", 100)
                         done_count = self._task_done_count_ctl(task_id)
                         search_exhausted = self._task_search_exhausted_ctl(task_id)
+                    if task_state == "aborted":
+                        with self._lock:
+                            self._task_status[task_id] = "aborted"
+                        evt.set()
+                        return
+                    if task_state == "failed":
+                        with self._lock:
+                            self._task_status[task_id] = "failed"
+                        evt.set()
+                        return
+                    if pause_release:
+                        # 暂停会让旧 worker 退出并释放账号；supervisor 不能
+                        # 因为 left==0 又把任务覆盖成 incomplete/done。
+                        with self._ctl_lock:
+                            task_row = self.ctl.execute(
+                                "SELECT status, error_message FROM tasks WHERE id = ?",
+                                (task_id,),
+                            ).fetchone()
+                            if task_row and task_row["status"] not in ("done", "aborted"):
+                                detail = str(task_row["error_message"] or "用户暂停")
+                                db.update_task_status(self.ctl, task_id, "paused", detail)
+                        with self._lock:
+                            self._task_status[task_id] = "paused"
+                        evt.set()
+                        return
                     if left == 0 and done_count >= int(target or 100):
                         with self._lock:
                             with self._ctl_lock:
@@ -1936,8 +2360,22 @@ class Scheduler:
                     return
                 time.sleep(0.2)
         except Exception as e:  # pragma: no cover
+            detail = f"{type(e).__name__}: {e}".strip()
+            # supervisor 自身异常以前只写入内存状态，GUI 下一次从数据库读取时
+            # 就只剩下一个无原因的失败/暂停状态。把异常持久化到任务和运行记录，
+            # 重启后仍能看到可排查的原因。
+            try:
+                with self._ctl_lock:
+                    db.update_task_status(self.ctl, task_id, "failed", detail)
+                self._update_collection_run(task_id, status="failed", stop_reason=detail)
+            except Exception as persist_exc:
+                self._emit_log(
+                    f"[scheduler] 任务 {task_id} 异常原因写入失败："
+                    f"{type(persist_exc).__name__}: {persist_exc}"
+                )
             with self._lock:
-                self._task_status[task_id] = f"supervisor_error:{e}"
+                self._task_status[task_id] = "failed"
+            self._emit_log(f"[scheduler] 任务 {task_id} supervisor 异常：{detail}")
             evt.set()
 
     def _worker(self, task_id: int, account_id: int, account_name: str):
@@ -1973,6 +2411,11 @@ class Scheduler:
                 evt.clear()
                 evt.wait(timeout=cooldown_left)
                 db.reset_batch(conn, account_id)
+                if self._stop.is_set() or self._task_stop_requested(task_id):
+                    # 暂停/停止期间不再把冷却后的账号写回 working；finally
+                    # 会把账号收敛到 idle（人工冻结除外）。
+                    conn.commit()
+                    return
             acct_row = conn.execute(
                 "SELECT bb_window_id FROM accounts WHERE id = ?", (account_id,)
             ).fetchone()
@@ -2031,6 +2474,10 @@ class Scheduler:
                             window_id=window_id,
                             **self._control_kwargs(self.collector.fetch_comments, task_id),
                         ) or []
+                        if self._stop.is_set() or self._task_stop_requested(task_id):
+                            self._release_video_for_retry(conn, vid["id"])
+                            conn.commit()
+                            break
                         self._emit_log(
                             f"[scheduler] 任务 {task_id} 账号 {account_name} 作品 {vid['vid']} "
                             f"评论采集完成：{len(comments)} 条"
@@ -2068,12 +2515,20 @@ class Scheduler:
                         self._handle_collected_comment(
                             conn, comment_id, lead_service,
                             task_id=task_id, video_id=vid["id"], comment=c)
+                    if self._stop.is_set() or self._task_stop_requested(task_id):
+                        # 取消可能发生在评论写入之后、完成标记之前；保留
+                        # assigned 状态，恢复时会从同一作品断点继续。
+                        self._release_video_for_retry(conn, vid["id"])
+                        conn.commit()
+                        break
                     self._finish_video(conn, vid["id"])
                     self._bump_account(conn, account_id)  # processed+1, batch+1
                     local_batch += 1
                     conn.commit()
                     if local_batch >= batch_size and self._has_more(conn, task_id, account_id, account_name):
-                        self._do_cooldown(conn, account_id, account_name, cd_seconds)
+                        self._do_cooldown(
+                            conn, account_id, account_name, cd_seconds, task_id=task_id
+                        )
                         local_batch = 0
                 except HumanInterventionRequired as h:
                     # P7：冻结账号，等待用户处理；该视频保持 collecting（恢复后续采）
@@ -2081,6 +2536,10 @@ class Scheduler:
                     self.mark_human_waiting(account_id, h.reason, task_id=task_id)
                 except Exception as e:  # noqa: BLE001
                     detail = f"{type(e).__name__}: {e}".strip()
+                    if self._stop.is_set() or self._task_stop_requested(task_id):
+                        self._release_video_for_retry(conn, vid["id"])
+                        conn.commit()
+                        break
                     if self._is_browser_connection_error(e):
                         # LiveCollector 会先自动重连并重试一次；仍然失败时暂停任务，
                         # 把当前作品放回 assigned，等待用户重开浏览器后点击继续。
@@ -2110,7 +2569,20 @@ class Scheduler:
                 # 不自动关闭浏览器：同一账号可能马上被等待队列中的下一个任务复用，
                 # 自动关闭会让缓存的 CDP 会话失效并导致后续任务启动失败。
             with self._lock:
-                self._worker_task.pop(account_id, None)
+                if self._worker_task.get(account_id) == task_id:
+                    self._worker_task.pop(account_id, None)
+                if self._worker_threads.get(account_id) is threading.current_thread():
+                    self._worker_threads.pop(account_id, None)
+                current_threads = self._task_threads.get(task_id)
+                if current_threads is not None:
+                    remaining = [
+                        thread for thread in current_threads
+                        if thread is not threading.current_thread() and thread.is_alive()
+                    ]
+                    if remaining:
+                        self._task_threads[task_id] = remaining
+                    else:
+                        self._task_threads.pop(task_id, None)
             try:
                 conn.close()
             except Exception:
@@ -2212,7 +2684,8 @@ class Scheduler:
         r = cur.fetchone()
         return bool(r and r["c"] > 0)
 
-    def _do_cooldown(self, conn, account_id: int, account_name: str, cd_seconds: int):
+    def _do_cooldown(self, conn, account_id: int, account_name: str, cd_seconds: int,
+                     task_id: int | None = None):
         """每组采完进入冷却：DB 落 cd_until；等待可取消；demo 钩子可模拟跳过。"""
         if cd_seconds <= 0:
             db.begin_cooldown(conn, account_id, 0)  # 立即过期，不等待
@@ -2224,6 +2697,11 @@ class Scheduler:
                 evt.clear()
                 evt.wait(timeout=cd_seconds)  # 可取消：shutdown/pause 置位即醒
             db.reset_batch(conn, account_id)  # batch_count 归零；cd_until 过期则清
+        if self._stop.is_set() or (task_id is not None and self._task_stop_requested(task_id)):
+            # 任务暂停/停止时，worker finally 负责最终 idle；这里不能把账号
+            # 又写回 working，否则状态轮询会看到短暂的假工作态。
+            conn.commit()
+            return
         # 冷却结束，恢复工作态（即使 cd_until 尚未过期也如实标记，报表更准确）
         self._acct_status(conn, account_id, "working")
         conn.commit()
@@ -2305,11 +2783,7 @@ class Scheduler:
             self._waiting_tasks.pop(account_id, None)
             self._human_events.setdefault(account_id, threading.Event()).set()
             with self._ctl_lock:
-                self.ctl.execute(
-                    "UPDATE accounts SET status = 'idle', wait_reason = NULL, wait_since = NULL WHERE id = ?",
-                    (account_id,),
-                )
-                self.ctl.commit()
+                db.update_account_status(self.ctl, account_id, "idle")
             self._log_human_action(account_id, "user_continued", "用户已处理，恢复采集")
             return True
 
@@ -2381,11 +2855,113 @@ class Scheduler:
     def waiting_accounts_for_task(self, task_id: int) -> set[int]:
         """返回指定任务当前处于人工等待的账号 ID（供 GUI 精确恢复）。"""
         with self._lock:
-            return {aid for aid, tid in self._waiting_tasks.items()
-                    if int(tid) == int(task_id) and aid in self._waiting_accounts}
+            current = {
+                aid for aid, tid in self._waiting_tasks.items()
+                if int(tid) == int(task_id) and aid in self._waiting_accounts
+            }
+        if current:
+            return current
+        # GUI 重启后内存中的 waiting_tasks 不存在；用任务绑定的账号和
+        # 持久化 waiting_human 状态恢复人工验证归属，避免继续时丢原账号。
+        try:
+            with self._conn_lock:
+                task = self._r(self.conn.execute(
+                    "SELECT platform, task_accounts FROM tasks WHERE id = ?",
+                    (int(task_id),),
+                ).fetchone())
+                if not task:
+                    return set()
+                names = task.get("task_accounts") or "[]"
+                if isinstance(names, str):
+                    try:
+                        names = _json.loads(names)
+                    except (TypeError, ValueError):
+                        names = []
+                if not isinstance(names, list):
+                    names = []
+                bound = {str(name).strip() for name in names if str(name).strip()}
+                rows = self.conn.execute(
+                    "SELECT id, name FROM accounts WHERE platform = ? "
+                    "AND status = 'waiting_human'",
+                    (str(task.get("platform") or "douyin"),),
+                ).fetchall()
+                return {
+                    int(row["id"]) for row in rows
+                    if not bound or str(row["name"] or "") in bound
+                }
+        except sqlite3.Error:
+            return set()
 
     # ------------------------------------------------------------------ 任务控制
-    def pause(self, task_id=None):
+    def _pause_task_and_release(self, task_id: int, reason: str = "用户暂停") -> None:
+        """发出可恢复暂停信号，并让该任务的账号最终回到 idle。
+
+        暂停不再让旧 worker 长时间停在内存里占用账号：先设置任务级停止
+        事件，采集器在当前可取消点退出，未完成作品保留为 assigned/collecting
+        断点；线程真正退出后由 worker/阶段 finally 清理账号租约。若底层浏览器
+        请求暂时不可取消，账号会暂时保留 working，直到线程真实退出，避免把仍
+        在操作浏览器的账号错误地释放给另一个任务。
+        """
+        tid = int(task_id)
+        with self._lock:
+            pause_evt = self._task_pause_evt(tid)
+            pause_evt.clear()
+            release_evt = self._pause_release_evts.setdefault(tid, threading.Event())
+            release_evt.set()
+            stop_evt = self._task_stop_evts.setdefault(tid, threading.Event())
+            stop_evt.set()
+            worker_items = [
+                (int(account_id), thread)
+                for account_id, owner_task in self._worker_task.items()
+                if int(owner_task) == tid
+                for thread in [self._worker_threads.get(account_id)]
+                if thread is not None
+            ]
+            phase = self._phase_threads.get(tid)
+            supervisor = self._supervisors.get(tid)
+
+        # 先落任务暂停态，supervisor 即使刚好观察到 worker 已退出，也不能
+        # 把用户暂停覆盖成自动补采/完成。
+        with self._ctl_lock:
+            row = self.ctl.execute(
+                "SELECT status FROM tasks WHERE id = ?", (tid,)
+            ).fetchone()
+            if row and row["status"] not in ("done", "aborted", "failed"):
+                db.update_task_status(self.ctl, tid, "paused", str(reason or "用户暂停"))
+
+        account_ids = {account_id for account_id, _thread in worker_items}
+        phase_account = None
+        with self._lock:
+            phase_account = self._phase_account_by_task.get(tid)
+        if phase_account is not None:
+            account_ids.add(int(phase_account))
+        # 取消冷却/人工等待；阶段 A 使用任务 stop_event，不需要调用共享
+        # collector.pause()，避免误伤其它任务。
+        for account_id in account_ids:
+            event = self._cd_events.get(account_id)
+            if event is not None:
+                event.set()
+            event = self._human_events.get(account_id)
+            if event is not None:
+                event.set()
+
+        self._mark_task_paused(tid, str(reason or "用户暂停"))
+        alive_names = []
+        for _account_id, thread in worker_items:
+            if thread.is_alive():
+                alive_names.append(thread.name)
+        if phase is not None and phase.is_alive():
+            alive_names.append(phase.name)
+        if supervisor is not None and supervisor.is_alive():
+            alive_names.append(supervisor.name)
+        if alive_names:
+            self._emit_log(
+                f"[scheduler] 任务 {tid} 已暂停，正在等待 {len(alive_names)} 个采集线程退出后释放账号"
+            )
+        else:
+            self._emit_log(f"[scheduler] 任务 {tid} 已暂停，账号已释放")
+
+    def pause(self, task_id=None, reason: str = "用户暂停"):
         """暂停采集。
 
         - 传 task_id：只暂停该任务（其它任务继续跑，符合"按任务编号暂停"）。
@@ -2394,20 +2970,19 @@ class Scheduler:
         if task_id is None:
             with self._lock:
                 self._global_paused = True
+                task_ids = set(self._pause_evts)
+                task_ids.update(self._task_threads)
+                task_ids.update(self._phase_threads)
+                task_ids.update(self._supervisors)
+                task_ids.update(int(tid) for tid in self._worker_task.values())
                 for evt in list(self._pause_evts.values()):
                     evt.clear()
+            for tid in sorted(task_ids):
+                self._pause_task_and_release(tid, reason=reason)
             if hasattr(self.collector, "pause"):
                 self.collector.pause()
         else:
-            self._task_pause_evt(task_id).clear()
-            # 持久化暂停态，GUI 重启后仍显示“继续”，不会把已暂停任务误认为
-            # 正在采集；当前正在执行的浏览器请求仍由其自身超时/返回收尾。
-            with self._ctl_lock:
-                row = self.ctl.execute(
-                    "SELECT status FROM tasks WHERE id = ?", (task_id,)
-                ).fetchone()
-                if row and row["status"] in ("phase_a_search", "phase_b_comments", "running"):
-                    db.update_task_status(self.ctl, task_id, "paused")
+            self._pause_task_and_release(task_id, reason=reason)
 
     def resume(self, task_id=None):
         """继续采集。
@@ -2420,12 +2995,27 @@ class Scheduler:
                 self._global_paused = False
                 for evt in list(self._pause_evts.values()):
                     evt.set()
+                restart_ids = []
+                for tid, release_evt in self._pause_release_evts.items():
+                    if release_evt.is_set():
+                        release_evt.clear()
+                        self._task_stop_evts.setdefault(tid, threading.Event()).clear()
+                        restart_ids.append(int(tid))
             if hasattr(self.collector, "resume"):
                 self.collector.resume()
+            for tid in sorted(set(restart_ids)):
+                threading.Thread(
+                    target=self.start, args=(tid,), name=f"resume-{tid}", daemon=True
+                ).start()
         else:
             with self._lock:
-                self._safety_recovery_tasks.add(int(task_id))
-            self._task_pause_evt(task_id).set()
+                tid = int(task_id)
+                self._safety_recovery_tasks.add(tid)
+                release_evt = self._pause_release_evts.get(tid)
+                if release_evt is not None and release_evt.is_set():
+                    release_evt.clear()
+                    self._task_stop_evts.setdefault(tid, threading.Event()).clear()
+                self._task_pause_evt(tid).set()
 
     def stop_task(self, task_id: int):
         """停止【指定任务】的所有 worker（其它任务不受影响）。
@@ -2434,6 +3024,11 @@ class Scheduler:
         之后该任务可再次 start 续跑（断点语义）。
         """
         with self._lock:
+            task_id = int(task_id)
+            # stop 与可恢复暂停必须区分，避免 supervisor 把停止误处理为
+            # 可继续的暂停；worker 仍会把当前作品保留为 assigned。
+            release_evt = self._pause_release_evts.setdefault(task_id, threading.Event())
+            release_evt.clear()
             stop_evt = self._task_stop_evts.setdefault(task_id, threading.Event())
             stop_evt.set()
             # 取消该任务暂停，避免 worker 停在暂停等待
@@ -2445,8 +3040,20 @@ class Scheduler:
                 acc_id for acc_id, tid in self._worker_task.items() if tid == task_id
             ]
             stop_threads = [self._worker_threads.get(a) for a in stop_accounts]
+            phase_account = self._phase_account_by_task.get(task_id)
+            if phase_account is not None:
+                stop_accounts.append(int(phase_account))
+            task_phase = self._phase_threads.get(task_id)
+            task_supervisor = self._supervisors.get(task_id)
+        # 先持久化 aborted，supervisor 读到停止信号前不会把任务落成其它终态。
+        with self._ctl_lock:
+            row = self.ctl.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row and row["status"] not in ("done", "failed"):
+                db.update_task_status(self.ctl, task_id, "aborted", "用户停止")
         # 唤醒冷却/人工等待，让 worker 立即退出取视频循环
-        for acc_id in stop_accounts:
+        for acc_id in set(stop_accounts):
             if acc_id in self._cd_events:
                 self._cd_events[acc_id].set()
             if acc_id in self._human_events:
@@ -2454,16 +3061,18 @@ class Scheduler:
         for t in stop_threads:
             if t is not None:
                 t.join(timeout=3)
-        phase = self._phase_threads.get(task_id)
+        phase = task_phase
         if phase is not None and phase is not threading.current_thread():
             phase.join(timeout=3)
-        supervisor = self._supervisors.get(task_id)
+        supervisor = task_supervisor
         if supervisor is not None and supervisor is not threading.current_thread():
             supervisor.join(timeout=3)
         with self._conn_lock:
-            db.update_task_status(self.conn, task_id, "aborted")
+            db.update_task_status(self.conn, task_id, "aborted", "用户停止")
         with self._lock:
             self._task_status[task_id] = "aborted"
+        if phase is not threading.current_thread():
+            self._release_phase_account(task_id)
         # 不调用共享 collector.cancel()：它会把其它任务一并取消。
 
     def _any_task_running(self, exclude_task_id=None) -> bool:
@@ -2488,6 +3097,7 @@ class Scheduler:
         """停止所有 worker（应用退出/全局停止）。唤醒全部等待并等待退出；可再次 start。"""
         self.stop_monitoring()
         self._stop.set()
+        self._runtime_heartbeat_stop.set()
         try:
             self._intent_batch_processor.close()
         except Exception:
@@ -2495,6 +3105,8 @@ class Scheduler:
         with self._lock:
             self._global_paused = False
             for evt in list(self._pause_evts.values()):
+                evt.set()
+            for evt in list(self._task_stop_evts.values()):
                 evt.set()
         if hasattr(self.collector, "cancel"):
             self.collector.cancel()
@@ -2507,11 +3119,33 @@ class Scheduler:
         with self._lock:
             phase_threads = list(self._phase_threads.values())
             supervisor_threads = list(self._supervisors.values())
+        current_thread = threading.current_thread()
         for t in threads + phase_threads + supervisor_threads:
-            t.join(timeout=2)
+            if t is not None and t is not current_thread:
+                t.join(timeout=2)
+        heartbeat = self._runtime_heartbeat_thread
+        if heartbeat is not None and heartbeat is not current_thread:
+            heartbeat.join(timeout=2)
+        with self._lock:
+            phase_accounts = list(self._phase_account_by_task)
+            phase_snapshot = {tid: self._phase_threads.get(tid) for tid in phase_accounts}
+        for tid in phase_accounts:
+            phase = phase_snapshot.get(tid)
+            if phase is None or not phase.is_alive():
+                self._release_phase_account(tid)
         # 清空按任务的暂停事件与任务登记，避免长期运行堆积
         with self._lock:
             self._pause_evts.clear()
+            for account_id, thread in list(self._worker_threads.items()):
+                if thread is None or not thread.is_alive():
+                    self._worker_threads.pop(account_id, None)
+                    self._worker_task.pop(account_id, None)
+            for tid, thread in list(self._phase_threads.items()):
+                if thread is None or not thread.is_alive():
+                    self._phase_threads.pop(tid, None)
+            for tid, thread in list(self._supervisors.items()):
+                if thread is None or not thread.is_alive():
+                    self._supervisors.pop(tid, None)
         if not any(t.is_alive() for t in threads + phase_threads + supervisor_threads):
             self._stop.clear()
         if close_connections:
@@ -2530,9 +3164,31 @@ class Scheduler:
     # ------------------------------------------------------------------ 报表
     def status_report(self) -> dict:
         """汇总报表（json.dumps 可直接序列化），供 GUI 渲染。"""
+        # UI 轮询是最频繁、最可靠的状态刷新入口。先清理旧进程/已结束
+        # 线程留下的 working/cooldown，再生成快照，避免界面长期显示假占用。
+        self._reconcile_stale_account_states()
         # 与采集回调对共享 self.conn 的写入使用同一把连接锁，确保 GUI
         # 轮询读取到的是完整提交后的快照，而不是写入过程中的半个结果。
         with self._conn_lock, self._lock:
+            all_accounts = [dict(item) for item in self._all_accounts()]
+            account_display = {}
+            for item in all_accounts:
+                platform_key = str(item.get("platform") or "douyin").strip().lower()
+                raw_name = str(item.get("name") or "").strip()
+                resolved_nickname = str(
+                    item.get("nickname") or item.get("nick") or item.get("display_name") or ""
+                ).strip()
+                # 纯数字通常是窗口/平台用户 ID，不应再冒充昵称显示。
+                display_name = resolved_nickname or (
+                    raw_name
+                    if raw_name and not looks_like_account_key(
+                        raw_name, window_id=item.get("bb_window_id")
+                    )
+                    else "未读取昵称"
+                )
+                if raw_name:
+                    account_display[(platform_key, raw_name)] = display_name
+                account_display[(platform_key, str(item.get("id") or ""))] = display_name
             tasks_out = {}
             for t in self._all_tasks():
                 tid = int(t["id"])
@@ -2556,6 +3212,42 @@ class Scheduler:
                 )
                 row = cur.fetchone()
                 done = self._r(row)
+                raw_done_count = int(vc.get("done", 0) or 0)
+                valid_video_done = raw_done_count
+                valid_comments = int(done.get("c", 0) or 0)
+                lead_count = 0
+                try:
+                    valid_row = self.conn.execute(
+                        "SELECT COUNT(*) AS c FROM videos "
+                        "WHERE task_id = ? AND status = 'done' "
+                        "AND TRIM(COALESCE(title, '')) <> '' "
+                        "AND TRIM(COALESCE(url, '')) <> '' "
+                        "AND TRIM(COALESCE(vid, '')) <> ''",
+                        (tid,),
+                    ).fetchone()
+                    valid_video_done = int(valid_row["c"] if valid_row else 0)
+                    valid_comment_row = self.conn.execute(
+                        "SELECT COUNT(*) AS c FROM comments c "
+                        "JOIN videos v ON v.id = c.video_id "
+                        "WHERE v.task_id = ? AND v.status = 'done' "
+                        "AND TRIM(COALESCE(v.title, '')) <> '' "
+                        "AND TRIM(COALESCE(v.url, '')) <> '' "
+                        "AND TRIM(COALESCE(c.content, '')) <> ''",
+                        (tid,),
+                    ).fetchone()
+                    valid_comments = int(valid_comment_row["c"] if valid_comment_row else 0)
+                    lead_row = self.conn.execute(
+                        "SELECT COUNT(DISTINCT l.id) AS c FROM leads l "
+                        "JOIN lead_evidence e ON e.lead_id = l.id "
+                        "LEFT JOIN videos v ON v.id = COALESCE(e.video_id, "
+                        "(SELECT c2.video_id FROM comments c2 WHERE c2.id = e.comment_id)) "
+                        "WHERE COALESCE(e.task_id, v.task_id) = ?",
+                        (tid,),
+                    ).fetchone()
+                    lead_count = int(lead_row["c"] if lead_row else 0)
+                except sqlite3.Error:
+                    # 旧库尚未建线索表时，任务报表仍可正常显示基础采集数据。
+                    pass
                 task_status = raw_status
                 pause_evt = self._pause_evts.get(tid)
                 if task_status == "aborted":
@@ -2595,6 +3287,29 @@ class Scheduler:
                 except sqlite3.Error:
                     # 旧库迁移失败时保留原状态报表，不让新增字段破坏 GUI。
                     pass
+                bound_names = t.get("task_accounts") or "[]"
+                if isinstance(bound_names, str):
+                    try:
+                        bound_names = _json.loads(bound_names)
+                    except (TypeError, ValueError):
+                        bound_names = []
+                if not isinstance(bound_names, list):
+                    bound_names = []
+                task_platform = str(t.get("platform") or "douyin").strip().lower()
+                account_names = []
+                for bound in bound_names:
+                    value = str(bound or "").strip()
+                    if not value:
+                        continue
+                    account_names.append(account_display.get((task_platform, value), value))
+                start_at = str((run_summary or {}).get("started_at") or t.get("created_at") or "")
+                end_at = str((run_summary or {}).get("finished_at") or "")
+                error_reason = str(
+                    t.get("error_message")
+                    or (run_summary or {}).get("stop_reason")
+                    or t.get("search_stop_reason")
+                    or ""
+                ).strip()
                 tasks_out[tid] = {
                     **t,
                     "status": task_status,
@@ -2603,8 +3318,15 @@ class Scheduler:
                     "video_assigned": vc.get("assigned", 0),
                     "video_collecting": vc.get("collecting", 0),
                     "video_done": vc.get("done", 0),
+                    "valid_video_done": valid_video_done,
                     "video_failed": vc.get("failed", 0),
                     "comments": int(done.get("c", 0)),
+                    "valid_comments": valid_comments,
+                    "lead_count": lead_count,
+                    "account_names": account_names,
+                    "start_at": start_at,
+                    "end_at": end_at,
+                    "error_reason": error_reason,
                     "keyword_queries": keyword_queries,
                     "keyword_count": len(keyword_queries),
                     "target_per_keyword": int(t.get("target_count") or 100),
@@ -2614,8 +3336,20 @@ class Scheduler:
                 }
 
             accounts_out = {}
-            for a in self._all_accounts():
+            for a in all_accounts:
                 d = dict(a)
+                raw_name = str(d.get("name") or "").strip()
+                resolved_nickname = str(
+                    d.get("nickname") or d.get("nick") or d.get("display_name") or ""
+                ).strip()
+                d["nickname"] = resolved_nickname or (
+                    raw_name
+                    if raw_name and not looks_like_account_key(
+                        raw_name, window_id=d.get("bb_window_id")
+                    )
+                    else ""
+                )
+                d["nickname_resolved"] = bool(resolved_nickname)
                 d["cooldown_left_seconds"] = self._cd_left_seconds(a.get("cd_until"))
                 accounts_out[f"{a['platform']}:{a['id']}"] = d
 
@@ -2635,13 +3369,24 @@ class Scheduler:
                 # 老数据库尚未完成线索表迁移时，保留基础总览数据。
                 pass
 
+            # “暂无更多视频”表示平台已明确耗尽，是可交付的终止状态；
+            # 它虽然没有达到用户设定目标，但不能继续被统计为未完成任务。
+            def terminal_task_done(item):
+                status = str(item.get("status") or "")
+                if status in ("done", "completed", "no_more"):
+                    return True
+                return status == "incomplete" and bool(item.get("search_exhausted"))
+
             totals = {
                 "tasks": len(tasks_out),
-                "tasks_running": sum(1 for t in tasks_out.values() if t["status"] in ("phase_a_search", "phase_b_comments")),
-                "tasks_done": sum(1 for t in tasks_out.values() if t["status"] == "done"),
+                "tasks_running": sum(1 for t in tasks_out.values()
+                                      if t["status"] in ("phase_a_search", "phase_b_comments", "running")),
+                "tasks_done": sum(1 for t in tasks_out.values() if terminal_task_done(t)),
                 "videos_total": sum(t["videos_total"] for t in tasks_out.values()),
                 "videos_done": sum(t["video_done"] for t in tasks_out.values()),
+                "valid_videos_done": sum(t["valid_video_done"] for t in tasks_out.values()),
                 "comments": sum(t["comments"] for t in tasks_out.values()),
+                "valid_comments": sum(t["valid_comments"] for t in tasks_out.values()),
                 "leads": lead_total,
                 "interactions": open_interaction_total,
                 "accounts": len(accounts_out),

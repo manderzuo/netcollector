@@ -43,6 +43,7 @@ $root = if ([System.IO.Path]::IsPathRooted($GuiDir)) { $GuiDir } else { Join-Pat
 $data = Join-Path $root 'data'
 $log = Join-Path $data 'gui_monitor.log'
 $hbFile = Join-Path $data 'gui_heartbeat.txt'
+$updateMarker = Join-Path $root '.update_pending'
 $guiPy = if ($Legacy) {
     Join-Path $root 'src\gui.py'
 } else {
@@ -199,6 +200,17 @@ while ($true) {
             # 只剩进程探测与心跳都失败持续 N 次才确认退出，防启动/轮询竞态误判
             Write-Log "进程探测不到 pid=$guiPid（待确认 $exitStreak/$confirmExits，暂不处理）"
         } else {
+            if (Test-Path -LiteralPath $updateMarker -PathType Leaf) {
+                $markerAge = ((Get-Date) - (Get-Item -LiteralPath $updateMarker).LastWriteTime).TotalSeconds
+                if ($markerAge -le 180) {
+                    Write-Log "检测到更新正在接管，跳过自动重启（marker_age=$([int]$markerAge)s）"
+                    $exitStreak = 0
+                    Start-Sleep -Seconds $IntervalSec
+                    continue
+                }
+                Remove-Item -LiteralPath $updateMarker -Force -ErrorAction SilentlyContinue
+                Write-Log '更新标记超过 180 秒，按过期标记清理并恢复监控'
+            }
             if ($AutoRestart) {
                 $restartCount++
                 Write-Alert "GUI 进程已退出 pid=$guiPid，自动重启(第 ${restartCount} 次)…"

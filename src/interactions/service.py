@@ -215,6 +215,8 @@ class InteractionService:
         draft = self._repo.get_draft(draft_id)
         if draft is None:
             raise ValueError(f"草稿不存在: {draft_id}")
+        if draft.get("status") == DraftStatus.SENT:
+            raise ValueError("该内容已经发送，已保留在已回复，不能退回待生成")
         if draft.get("status") != DraftStatus.FAILED:
             raise ValueError("只有失败内容可以退回待生成")
         self._repo.update_draft_status(draft_id, DraftStatus.DRAFT)
@@ -229,6 +231,16 @@ class InteractionService:
         draft = self._repo.get_draft(draft_id)
         if draft is None:
             raise ValueError(f"草稿不存在: {draft_id}")
+        # 发送过程中页面可能已经把旧行留在“待发送”页签，后台随后才把
+        # 草稿落成 failed。兼容这类过期按钮点击，沿用失败项的恢复流程；
+        # 已发送内容仍然是不可逆的，避免从“已回复”误删发送记录。
+        if draft.get("status") == DraftStatus.FAILED:
+            self.return_failed_to_draft(draft_id)
+            return
+        if draft.get("status") == DraftStatus.SENT:
+            raise ValueError("该内容已经发送，已保留在已回复，不能退回待生成")
+        if draft.get("status") == DraftStatus.SENDING:
+            raise ValueError("该内容仍在发送中，请等待发送结果刷新")
         if draft.get("status") != DraftStatus.QUEUED:
             raise ValueError("只有待发送内容可以退回待生成")
         self._repo.update_draft_status(draft_id, DraftStatus.DRAFT)
@@ -579,9 +591,27 @@ class InteractionService:
                            *, confirm: bool = False,
                            real_send_enabled: bool = False) -> ReplyActionResult:
         """重新定位并发送回复；确认与真实发送开关缺一不可。"""
-        target = self.resolve_reply_target(draft_id, account_id)
         draft = self._repo.get_draft(draft_id)
-        if draft is None or draft.get("status") not in (DraftStatus.APPROVED, DraftStatus.QUEUED):
+        if draft is None:
+            raise ValueError(f"草稿不存在: {draft_id}")
+        # 真实发送成功后，浏览器慢、前端超时或重复点击都不能再次触发
+        # 平台操作。把已完成发送作为幂等成功返回，记录继续留在已回复。
+        if draft.get("status") == DraftStatus.SENT:
+            return ReplyActionResult(
+                ok=True,
+                stage="already_sent",
+                message="该评论已经发送，记录已保留在已回复",
+                verified=True,
+            )
+        if draft.get("status") == DraftStatus.SENDING:
+            return ReplyActionResult(
+                ok=False,
+                stage="sending",
+                message="该评论正在发送中，请等待浏览器操作完成",
+                verified=False,
+            )
+        target = self.resolve_reply_target(draft_id, account_id)
+        if draft.get("status") not in (DraftStatus.APPROVED, DraftStatus.QUEUED):
             raise ValueError("只有审核通过或待发送的草稿才能发送")
         if (draft.get("interaction_type") or "comment_reply") != "comment_reply":
             raise ValueError("当前草稿是私信，请使用私信发送流程")
@@ -748,9 +778,27 @@ class InteractionService:
             *, confirm: bool = False,
             real_send_enabled: bool = False) -> ReplyActionResult:
         """重新定位用户并发送私信；确认和真实发送开关缺一不可。"""
-        target = self.resolve_private_message_target(draft_id, account_id)
         draft = self._repo.get_draft(draft_id)
-        if draft is None or draft.get("status") not in (DraftStatus.APPROVED, DraftStatus.QUEUED):
+        if draft is None:
+            raise ValueError(f"草稿不存在: {draft_id}")
+        # 与评论回复保持相同的幂等语义：重复点击只读取已发送结果，
+        # 不重新打开浏览器或再次发送私信。
+        if draft.get("status") == DraftStatus.SENT:
+            return ReplyActionResult(
+                ok=True,
+                stage="already_sent",
+                message="该私信已经发送，记录已保留在已回复",
+                verified=True,
+            )
+        if draft.get("status") == DraftStatus.SENDING:
+            return ReplyActionResult(
+                ok=False,
+                stage="sending",
+                message="该私信正在发送中，请等待浏览器操作完成",
+                verified=False,
+            )
+        target = self.resolve_private_message_target(draft_id, account_id)
+        if draft.get("status") not in (DraftStatus.APPROVED, DraftStatus.QUEUED):
             raise ValueError("只有审核通过或待发送的私信才能发送")
         if not confirm:
             return ReplyActionResult(

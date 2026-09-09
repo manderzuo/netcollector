@@ -26,7 +26,11 @@ except ImportError:
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.cdp import CdpSession
+try:
+    # 与 dy_collect 保持同一套源码/冻结包兼容导入策略。
+    from .cdp import CdpSession
+except ImportError:
+    from cdp import CdpSession
 try:
     from .dy_collect import SearchVideosResult
 except ImportError:
@@ -51,6 +55,10 @@ async def probe_blocked(c, sid):
       if (location.href.startsWith('chrome-extension:')) return 'bitbrowser拦截';
       if (/请求太频繁|操作频繁|一分钟后再试|访问频繁/.test(bodyText)) return 'rate_limited';
       if (/登录后查看|扫码登录/.test(t)) return '登录弹窗';
+      // 小红书的手机号登录有时是整页登录态，不一定挂在 dialog 上。
+      // 必须在自动重试/等待前抛给调度器，不能继续刷新页面打断验证码输入。
+      if (/\/login(?:[/?#]|$)/.test(location.pathname)
+          || /手机号登录|验证码登录|输入手机号|获取验证码/.test(bodyText)) return '登录页面';
       if (/滑块|拖动验证|滑动验证|安全验证|请完成验证|验证码|人机验证/.test(t)) return '验证码';
       return null;
     })()''', sid)
@@ -73,12 +81,10 @@ async def load_feeds(c, sid, keyword, target_count=100,
         blk = await probe_blocked(c, sid)
         if blk:
             raise HumanBlock(blk)
-        # 连续导航会污染 __INITIAL_STATE__，整页刷新拿到干净状态。
-        try:
-            await c.eval("location.reload()", sid)
-        except Exception:
-            pass
-        await asyncio.sleep(5 + attempt * 2)
+        # 不再执行 location.reload()。人工登录/输入短信验证码可能需要较长时间，
+        # 自动刷新会直接清掉手机号和验证码状态。若页面确实是登录页，上一轮
+        # probe_blocked 已经抛出 HumanBlock，调度器会冻结等待人工处理。
+        await asyncio.sleep(2 + attempt)
         blk = await probe_blocked(c, sid)
         if blk:
             raise HumanBlock(blk)

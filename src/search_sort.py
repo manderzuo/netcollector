@@ -31,6 +31,10 @@ SEARCH_SORT_OPTIONS = {
     "kuaishou": [
         ("综合排序", "default"),
     ],
+    "tieba": [
+        ("最新帖子", "latest"),
+        ("热门帖子", "hot"),
+    ],
 }
 
 
@@ -64,4 +68,5 @@ def latest_sort_key(platform: str) -> str:
         "weibo": "realtime",
         "bilibili": "pubdate",
         "kuaishou": "latest",
+        "tieba": "latest",
     }.get(platform, "latest")

@@ -13,6 +13,7 @@ PLATFORM_LABELS = {
     "bilibili": "B站",
     "weibo": "微博",
     "kuaishou": "快手",
+    "tieba": "百度贴吧",
 }
 
 PLATFORM_ALIASES = {
@@ -30,9 +31,12 @@ PLATFORM_ALIASES = {
     "kuaishou": "kuaishou",
     "ks": "kuaishou",
     "快手": "kuaishou",
+    "tieba": "tieba",
+    "百度贴吧": "tieba",
+    "贴吧": "tieba",
 }
 
-PLATFORM_ORDER = ("douyin", "xhs", "bilibili", "weibo", "kuaishou")
+PLATFORM_ORDER = ("douyin", "xhs", "bilibili", "weibo", "kuaishou", "tieba")
 
 PLATFORM_HOME_URLS = {
     "douyin": "https://www.douyin.com/",
@@ -40,6 +44,7 @@ PLATFORM_HOME_URLS = {
     "bilibili": "https://www.bilibili.com/",
     "weibo": "https://weibo.com/",
     "kuaishou": "https://www.kuaishou.com/new-reco",
+    "tieba": "https://tieba.baidu.com/",
 }
 
 PLATFORM_WINDOW_FILES = {
@@ -48,6 +53,7 @@ PLATFORM_WINDOW_FILES = {
     "bilibili": "bilibili_chrome_window.txt",
     "weibo": "weibo_chrome_window.txt",
     "kuaishou": "kuaishou_window.txt",
+    "tieba": "tieba_api.txt",
 }
 
 PLATFORM_HOSTS = {
@@ -56,6 +62,7 @@ PLATFORM_HOSTS = {
     "bilibili": ("bilibili.com", "b23.tv"),
     "weibo": ("weibo.com", "weibo.cn"),
     "kuaishou": ("kuaishou.com", "gifshow.com"),
+    "tieba": ("tieba.baidu.com",),
 }
 
 

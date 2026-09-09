@@ -23,11 +23,22 @@ import csv
 import json
 import os
 import sys
+from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-INTENT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intent_rules.json")
+def _intent_file_candidates() -> list[Path]:
+    """查找源码版和 PyInstaller 版的意向规则资源。"""
+    module_dir = Path(__file__).resolve().parent
+    roots = [module_dir, module_dir / "src"]
+    bundle_root = getattr(sys, "_MEIPASS", "")
+    if bundle_root:
+        roots.extend([Path(bundle_root), Path(bundle_root) / "src"])
+    return [root / "intent_rules.json" for root in roots]
+
+
+INTENT_FILE = str(_intent_file_candidates()[0])
 
 
 def _minute_time(value):
@@ -44,8 +55,14 @@ def _minute_time(value):
 
 
 def load_intent_rules():
-    with open(INTENT_FILE, encoding="utf-8") as f:
-        return json.load(f)
+    for path in _intent_file_candidates():
+        try:
+            with path.open(encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            continue
+    searched = ", ".join(str(path) for path in _intent_file_candidates())
+    raise FileNotFoundError(f"找不到意向规则文件 intent_rules.json，已搜索：{searched}")
 
 
 _RULES = None
@@ -202,6 +219,37 @@ def load_items(platform, path):
 # ---------------------------------------------------------------------------
 # 打分 + 汇总
 # ---------------------------------------------------------------------------
+def _has_text(value):
+    return str(value or "").strip() != ""
+
+
+def filter_valid_items(items):
+    """过滤无效作品/评论，导出计数与文件内容使用同一份数据集。
+
+    采集链路保留原始库记录用于审计，但导出层不输出空标题、空链接或
+    空评论正文，避免“任务完成数量”和可交付数据不一致。
+    """
+    valid = []
+    for raw in items or []:
+        if not isinstance(raw, dict):
+            continue
+        if not _has_text(raw.get("title")) or not _has_text(raw.get("url")):
+            continue
+        comments = []
+        for comment in raw.get("comments") or []:
+            if not isinstance(comment, dict) or not _has_text(
+                comment.get("text", comment.get("content"))
+            ):
+                continue
+            item = dict(comment)
+            item["text"] = str(item.get("text", item.get("content")) or "").strip()
+            comments.append(item)
+        item = dict(raw)
+        item["comments"] = comments
+        valid.append(item)
+    return valid
+
+
 def score_items(items):
     """为每条评论打分，注入 intent_score/intent_label/suggestion。"""
     for it in items:
@@ -218,11 +266,12 @@ def score_items(items):
 # ---------------------------------------------------------------------------
 def export_unified(items, outdir, task="task"):
     """导出单一主数据 CSV：作品、评论、意向和用户聚合字段合并。"""
+    items = filter_valid_items(items)
     score_items(items)
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, f"{task}.csv")
     header = [
-        "平台", "视频ID", "标题", "作者", "发布时间", "采集时间", "作品URL", "评论状态",
+        "平台", "视频ID", "标题", "帖子内容", "作者", "发布时间", "采集时间", "作品URL", "评论状态",
         "地区", "用户ID", "昵称", "用户主页", "评论内容", "点赞数", "评论时间",
         "意向评分", "意向评级", "高意向评论数", "评论总条数",
         "最新评论时间", "涉及作品数", "高意向评论摘录", "涉及作品列表",
@@ -255,15 +304,26 @@ def export_unified(items, outdir, task="task"):
     rows = []
     for it in items:
         comments = it.get("comments", [])
-        source_rows = comments or [{}]
-        for cm in source_rows:
+        content = it.get("content") or it.get("description") or ""
+        if not comments:
+            # 贴吧帖子可能已被删除或暂时没有可读楼层，但搜索结果本身仍
+            # 是有效采集内容；保留帖子元数据，避免导出只有表头。
+            rows.append([
+                _esc(it.get("kind")), _esc(it.get("pid")), _esc(it.get("title")),
+                _esc(content), _esc(it.get("author")), _esc(it.get("pub_str")),
+                _minute_time(it.get("collected_at")), _esc(it.get("url")), "0条",
+                *([""] * 15),
+            ])
+            continue
+        for cm in comments:
             aggregate_key = cm.get("_aggregate_key", "")
             u = users.get(aggregate_key, {"high": 0, "total": 0, "times": [], "works": set(), "high_texts": []})
             times = sorted(u["times"])
             works = sorted(u["works"])
             rows.append([
                 _esc(it.get("kind")), _esc(it.get("pid")), _esc(it.get("title")),
-                _esc(it.get("author")), _esc(it.get("pub_str")), _minute_time(it.get("collected_at")), _esc(it.get("url")),
+                _esc(content), _esc(it.get("author")), _esc(it.get("pub_str")),
+                _minute_time(it.get("collected_at")), _esc(it.get("url")),
                 f"{len(comments)}条",
                 _esc(cm.get("region")), _esc(cm.get("uid")), _esc(cm.get("nickname")),
                 _esc(cm.get("homepage")), _esc(cm.get("text")), _esc(cm.get("digg")),
@@ -301,6 +361,7 @@ def _esc(s):
 
 def export(items, outdir, task="task"):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    items = filter_valid_items(items)
     score_items(items)
 
     # ---- 1. videos.csv 作品清单 ----

@@ -74,6 +74,7 @@ class TestUi2State(unittest.TestCase):
                 "douyin:14": {
                     "id": 14,
                     "name": "12345678a",
+                    "nickname": "抖音真实昵称",
                     "platform": "douyin",
                     "status": "waiting_human",
                     "bb_window_id": "window-14",
@@ -96,7 +97,80 @@ class TestUi2State(unittest.TestCase):
         self.assertEqual(douyin["status_label"], "待人工验证")
         self.assertEqual(douyin["binding_label"], "已绑定窗口")
         self.assertEqual(douyin["cooldown_left_seconds"], 2)
+        self.assertEqual(douyin["name"], "抖音真实昵称")
+        self.assertEqual(douyin["account_key"], "12345678a")
         self.assertEqual(xhs["binding_label"], "未绑定窗口")
+
+    def test_numeric_account_key_does_not_render_as_nickname(self):
+        state = Ui2State()
+        state.apply_snapshot({
+            "accounts": {"douyin:16": {
+                "id": 16, "name": "1234567899", "platform": "douyin",
+                "status": "idle", "nickname": "", "nickname_resolved": False,
+            }}
+        })
+        row = state.account_rows()[0]
+        self.assertEqual(row["nickname"], "未读取昵称")
+        self.assertEqual(row["name"], "未读取昵称")
+        self.assertEqual(row["account_key"], "1234567899")
+        self.assertFalse(row["nickname_resolved"])
+
+    def test_alphanumeric_account_key_does_not_render_as_nickname(self):
+        state = Ui2State()
+        state.apply_snapshot({
+            "accounts": {"douyin:14": {
+                "id": 14, "name": "12345678a", "nickname": "12345678a",
+                "nickname_resolved": False, "platform": "douyin",
+                "status": "idle", "bb_window_id": "8f25390d00ab4325a53af73840a6e41b",
+            }}
+        })
+        row = state.account_rows()[0]
+        self.assertEqual(row["nickname"], "未读取昵称")
+        self.assertEqual(row["name"], "未读取昵称")
+        self.assertFalse(row["nickname_resolved"])
+
+    def test_explicit_platform_nickname_is_rendered_even_if_it_looks_like_an_id(self):
+        state = Ui2State()
+        state.apply_snapshot({
+            "accounts": {"douyin:16": {
+                "id": 16, "name": "1234567899",
+                "nickname": "抖音号：dyu431gedsv7",
+                "nickname_resolved": True, "platform": "douyin",
+                "status": "idle", "bb_window_id": "65b60ce115d24f56a85cbcc5b48ac9ca",
+            }}
+        })
+        row = state.account_rows()[0]
+        self.assertEqual(row["nickname"], "抖音号：dyu431gedsv7")
+        self.assertEqual(row["name"], "抖音号：dyu431gedsv7")
+        self.assertTrue(row["nickname_resolved"])
+
+    def test_task_rows_expose_account_times_error_and_valid_counts(self):
+        state = Ui2State()
+        state.apply_snapshot({
+            "tasks": {"4": {
+                "id": 4, "keyword": "洗鞋", "platform": "douyin",
+                "status": "exception", "error_message": "浏览器连接超时",
+                "task_accounts": '["12345678a"]',
+                "latest_run": {"started_at": "2026-09-03 09:00:00",
+                                "finished_at": "2026-09-03 09:01:00"},
+                "target_count": 10, "video_done": 5,
+                "valid_video_done": 3, "comments": 8, "valid_comments": 2,
+                "lead_count": 1,
+            }},
+            "accounts": {"douyin:14": {"id": 14, "name": "12345678a",
+                                         "nickname": "测试昵称", "platform": "douyin"}},
+        })
+        row = state.task_rows()[0]
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["status_label"], "失败")
+        self.assertEqual(row["error_reason"], "浏览器连接超时")
+        self.assertEqual(row["start_at"], "2026-09-03 09:00:00")
+        self.assertEqual(row["end_at"], "2026-09-03 09:01:00")
+        self.assertEqual(row["account_label"], "12345678a")
+        self.assertEqual(row["valid_video_done"], 3)
+        self.assertEqual(row["progress"], 30)
+        account = state.account_rows()[0]
+        self.assertEqual(account["name"], "测试昵称")
 
     def test_lead_rows_expose_comment_and_filter_labels_in_chinese(self):
         state = Ui2State()
@@ -383,9 +457,12 @@ class TestUi2State(unittest.TestCase):
         self.assertIn("previewVideoPlayer", qml)
         self.assertIn("publishPage.editorTitle, publishPage.editorBody", qml)
         self.assertIn("publishPage.editorTopics)", qml)
-        self.assertIn("id: publishScheduleDateChooser", qml)
-        self.assertIn("id: publishScheduleHourChooser", qml)
-        self.assertIn("id: publishScheduleMinuteChooser", qml)
+        self.assertIn("id: schedulePickerDialog", qml)
+        self.assertIn("id: schedulePickerHourChooser", qml)
+        self.assertIn("id: schedulePickerMinuteChooser", qml)
+        self.assertIn("function scheduleDisplayText()", qml)
+        self.assertIn("function openSchedulePicker()", qml)
+        self.assertIn("Overlay.modal: Rectangle", qml)
         self.assertIn("function scheduleSelectionIsFuture()", qml)
         self.assertIn("backend.beijingNowText", qml)
         self.assertNotIn("id: publishScheduledAt", qml)

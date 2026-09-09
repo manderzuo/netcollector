@@ -207,6 +207,27 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 2)
         conn.close()
 
+    def test_account_nickname_is_separate_from_task_binding_key(self):
+        conn = db.init_db(self.db_path)
+        account_id = db.upsert_account(conn, "1234567899", "window-1", "douyin")
+        db.update_account_nickname(conn, account_id, "真实平台昵称")
+        row = conn.execute(
+            "SELECT name, nickname, bb_window_id FROM accounts WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+        self.assertEqual(row["name"], "1234567899")
+        self.assertEqual(row["nickname"], "真实平台昵称")
+        self.assertEqual(row["bb_window_id"], "window-1")
+        # 重复保存账号/窗口不能清空已经读取到的昵称。
+        self.assertEqual(
+            db.upsert_account(conn, "1234567899", "window-1", "douyin"), account_id
+        )
+        self.assertEqual(
+            conn.execute("SELECT nickname FROM accounts WHERE id = ?", (account_id,)).fetchone()[0],
+            "真实平台昵称",
+        )
+        conn.close()
+
     def test_distinct_accounts_run_in_parallel(self):
         sched = Scheduler(self.db_path, bb=None, collector=SlowCollector(5, .08))
         sched.add_account("a", "wa", "douyin")
@@ -306,6 +327,69 @@ class CoreTests(unittest.TestCase):
         restart_waiting.assert_not_called()
         sched.shutdown(close_connections=True)
 
+    def test_startup_reconciles_orphaned_working_account(self):
+        """旧版本/异常退出留下的 working，重启后必须回到 idle。"""
+        sched = Scheduler(self.db_path, bb=None, collector=SlowCollector(0))
+        account_id = sched.add_account("残留账号", "window-stale", "douyin")
+        # 模拟旧版本只写 status、没有运行租约的数据库残留。
+        db.update_account_status(sched.conn, account_id, "working")
+        sched.shutdown(close_connections=True)
+
+        restarted = Scheduler(self.db_path, bb=None, collector=SlowCollector(0))
+        row = restarted.conn.execute(
+            "SELECT status, runtime_owner, runtime_heartbeat, cd_until "
+            "FROM accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        self.assertEqual(row["status"], "idle")
+        self.assertIsNone(row["runtime_owner"])
+        self.assertIsNone(row["runtime_heartbeat"])
+        self.assertIsNone(row["cd_until"])
+        restarted.shutdown(close_connections=True)
+
+    def test_pause_releases_worker_account_and_keeps_video_checkpoint(self):
+        """用户暂停会退出 worker，账号释放，未完成作品保留给后续继续。"""
+        sched = Scheduler(self.db_path, bb=None, collector=SlowCollector(8, .4))
+        account_id = sched.add_account("暂停释放账号", "window-pause-release", "douyin")
+        task_id = sched.create_task(
+            "暂停释放", target_count=8, task_accounts=["暂停释放账号"]
+        )
+        starter = threading.Thread(target=sched.start, args=(task_id,), daemon=True)
+        starter.start()
+
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            row = sched.conn.execute(
+                "SELECT status FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+            if row and row["status"] == "working":
+                break
+            time.sleep(.02)
+        else:
+            self.fail("账号未进入 working")
+
+        sched.pause(task_id)
+        starter.join(timeout=3)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            row = sched.conn.execute(
+                "SELECT status, runtime_owner FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+            task_row = sched.conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row and row["status"] == "idle" and task_row and task_row["status"] == "paused":
+                break
+            time.sleep(.03)
+        else:
+            self.fail("暂停后账号未释放或任务未保持 paused")
+        self.assertIsNone(row["runtime_owner"])
+        pending = sched.conn.execute(
+            "SELECT COUNT(*) FROM videos WHERE task_id = ? AND status IN ('assigned','collecting')",
+            (task_id,),
+        ).fetchone()[0]
+        self.assertGreater(pending, 0)
+        sched.shutdown(close_connections=True)
+
     def test_human_pause_resumes_unfinished_keyword_search_before_comments(self):
         collector = HumanOnSecondKeywordCollector()
         sched = Scheduler(self.db_path, bb=None, collector=collector)
@@ -376,7 +460,7 @@ class CoreTests(unittest.TestCase):
 
     def test_stop_interrupts_search_phase(self):
         sched = Scheduler(self.db_path, bb=None, collector=CancellableSearch())
-        sched.add_account("a", "w", "douyin")
+        account_id = sched.add_account("a", "w", "douyin")
         task = sched.create_task("K", target_count=2, task_accounts=["a"])
         thread = threading.Thread(target=sched.start, args=(task,), daemon=True)
         thread.start()
@@ -387,6 +471,12 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertLess(time.monotonic() - started, 1)
         self.assertEqual(sched.status_report()["tasks"][task]["status"], "stopped")
+        self.assertEqual(
+            sched.conn.execute(
+                "SELECT status FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()[0],
+            "idle",
+        )
         sched.shutdown(close_connections=True)
 
 

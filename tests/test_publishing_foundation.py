@@ -129,6 +129,7 @@ class PublishingFoundationTests(unittest.TestCase):
         self.assertIn("normalizeContent(String(data.body || ''))", script)
         self.assertIn("maxLengthOf", script)
         self.assertIn("titlePrefixAccepted", script)
+        self.assertIn("titleTarget.slice(0, titleLimit)", script)
         self.assertIn("mismatches", script)
         self.assertIn("verified", script)
         self.assertNotIn(".click(", script)
@@ -425,11 +426,15 @@ class PublishingFoundationTests(unittest.TestCase):
             {"url": "https://www.douyin.com/note/abc", "title": "重复"},
             {"url": "https://www.douyin.com/video/xyz", "title": "视频", "comment_count": 8},
             {"url": "https://www.douyin.com/user/other", "title": "不是作品"},
+            # 主页卡片没有标题时，部分页面会把作品 ID 填到 title；
+            # 账号信息页应显示“未命名内容”，不能把数字 ID 当标题。
+            {"url": "https://www.douyin.com/video/9876543210123456789", "title": "9876543210123456789"},
         ])
-        self.assertEqual([item["content_id"] for item in items], ["abc", "xyz"])
+        self.assertEqual([item["content_id"] for item in items], ["abc", "xyz", "9876543210123456789"])
         self.assertEqual(items[0]["content_type"], "note")
         self.assertEqual(items[0]["extra"]["__account_content_origin"], "profile_sync")
         self.assertEqual(items[1]["comment_count"], 8)
+        self.assertEqual(items[2]["title"], "未命名内容")
 
     def test_kuaishou_account_contents_are_supported_without_enabling_publish_variants(self):
         account_id = db.upsert_account(

@@ -11,13 +11,24 @@ import json
 import hashlib
 import os
 import sqlite3
+import time
 from datetime import datetime
 from typing import Any, Mapping
 
 try:
-    from ..time_utils import normalize_scheduled_at  # type: ignore
+    from ..time_utils import (  # type: ignore
+        beijing_now,
+        format_beijing_minute,
+        normalize_scheduled_at,
+        parse_beijing_datetime,
+    )
 except ImportError:  # pragma: no cover - 直接以 src 为模块根目录时
-    from time_utils import normalize_scheduled_at  # type: ignore
+    from time_utils import (  # type: ignore
+        beijing_now,
+        format_beijing_minute,
+        normalize_scheduled_at,
+        parse_beijing_datetime,
+    )
 
 
 PLATFORMS = ("douyin", "xhs", "bilibili", "weibo")
@@ -38,6 +49,21 @@ PUBLISH_STATUS_LABELS = {
     "retryable_failed": "可重试失败",
     "failed": "失败",
     "cancelled": "已取消",
+}
+
+PUBLISH_JOB_STATUS_LABELS = {
+    "queued": "待执行",
+    "running": "执行中",
+    "published": "已完成",
+    "failed": "失败",
+}
+PUBLISH_JOB_STEP_LABELS = {
+    "queued": "等待发布",
+    "scheduled": "已预约",
+    "publishing": "正在打开浏览器发布",
+    "completed": "发布完成",
+    "not_confirmed": "未确认发布",
+    "failed": "执行失败",
 }
 
 VIDEO_ASSET_SUFFIXES = frozenset({
@@ -145,6 +171,20 @@ class PublishingService:
                 (int(row["id"]),),
             ).fetchall()
             item["assets"] = [dict(asset) for asset in asset_rows]
+            job_rows = self.conn.execute(
+                "SELECT j.id, j.variant_id, j.account_id, a.name AS account_name, "
+                "j.scheduled_at, j.status, j.current_step, j.real_send_authorized, "
+                "j.retry_count, j.platform_post_id, j.platform_url, j.error_code, "
+                "j.error_message, j.run_id, j.created_at, j.updated_at "
+                "FROM publish_jobs j LEFT JOIN accounts a ON a.id = j.account_id "
+                "JOIN publish_variants vj ON vj.id = j.variant_id "
+                "WHERE vj.draft_id = ? ORDER BY j.id DESC",
+                (int(row["id"]),),
+            ).fetchall()
+            item["publish_jobs"] = [self._job_view(job) for job in job_rows]
+            item["latest_publish_job"] = (
+                item["publish_jobs"][0] if item["publish_jobs"] else {}
+            )
             items.append(item)
         return {
             "items": items,
@@ -336,11 +376,14 @@ class PublishingService:
             )
 
     def schedule_variant(self, *, draft_id: int, platform: str,
-                         account_id: int, scheduled_at: str = "") -> int:
+                         account_id: int, scheduled_at: str = "",
+                         real_send_authorized: bool = False) -> int:
         """创建待发布任务，并把计划时间固定解释为北京时间。
 
-        这里仍只创建队列记录；真实浏览器发送必须经过显式授权和发布执行器。
-        但无论从 GUI 还是后台直接调用，都不能写入已经过去的计划时间。
+        定时任务在这里写入持久化队列。``real_send_authorized`` 是用户在
+        发布中心明确开启真实发布后随任务保存的授权快照；没有这个授权，
+        后台到点只会保留任务并提示人工处理，不会误点平台的最终发布按钮。
+        无论从 GUI 还是后台直接调用，都不能写入已经过去的计划时间。
         """
         draft_id = int(draft_id)
         account_id = int(account_id)
@@ -369,15 +412,102 @@ class PublishingService:
             cursor = self.conn.execute(
                 "INSERT INTO publish_jobs "
                 "(variant_id, account_id, scheduled_at, status, current_step, "
-                "real_send_authorized, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, 0, ?, ?)",
+                "real_send_authorized, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
                 (int(row["id"]), account_id, normalized_scheduled_at or None,
-                 "scheduled" if normalized_scheduled_at else "queued", now, now),
+                 "scheduled" if normalized_scheduled_at else "queued",
+                 1 if real_send_authorized else 0, now, now),
             )
             self.conn.execute(
                 "UPDATE publish_drafts SET status = 'queued', updated_at = ? WHERE id = ?",
                 (now, draft_id),
             )
             return int(cursor.lastrowid)
+
+    @staticmethod
+    def _job_view(row: Mapping[str, Any]) -> dict[str, Any]:
+        """把发布任务转换为界面可直接展示的稳定结构。"""
+        item = dict(row)
+        item["status"] = str(item.get("status") or "queued")
+        item["current_step"] = str(item.get("current_step") or "queued")
+        item["status_label"] = PUBLISH_JOB_STATUS_LABELS.get(
+            item["status"], item["status"]
+        )
+        item["current_step_label"] = PUBLISH_JOB_STEP_LABELS.get(
+            item["current_step"], item["current_step"]
+        )
+        item["real_send_authorized"] = bool(item.get("real_send_authorized"))
+        raw_time = str(item.get("scheduled_at") or "").strip()
+        if raw_time:
+            try:
+                item["scheduled_at_label"] = format_beijing_minute(raw_time)
+            except ValueError:
+                item["scheduled_at_label"] = raw_time
+        else:
+            item["scheduled_at_label"] = "立即准备"
+        return item
+
+    def claim_due_scheduled_job(self, *, now=None, run_id: str = "") -> dict[str, Any] | None:
+        """原子领取一条到期且已获真实发布授权的定时任务。
+
+        该方法只负责数据库状态推进，不操作浏览器。通过条件 UPDATE 防止
+        后台轮询或重启恢复时重复领取同一任务。
+        """
+        reference = beijing_now() if now is None else parse_beijing_datetime(now)
+        rows = self.conn.execute(
+            "SELECT j.id, j.variant_id, j.account_id, a.name AS account_name, "
+            "v.draft_id, v.platform, j.scheduled_at, j.status, j.current_step, "
+            "j.real_send_authorized, j.retry_count, j.run_id "
+            "FROM publish_jobs j "
+            "JOIN publish_variants v ON v.id = j.variant_id "
+            "LEFT JOIN accounts a ON a.id = j.account_id "
+            "JOIN publish_drafts d ON d.id = v.draft_id "
+            "WHERE j.status = 'queued' AND j.current_step = 'scheduled' "
+            "AND j.real_send_authorized = 1 AND j.scheduled_at IS NOT NULL "
+            "AND d.status IN ('approved', 'queued') "
+            "ORDER BY j.scheduled_at, j.id LIMIT 20"
+        ).fetchall()
+        for row in rows:
+            raw_time = str(row["scheduled_at"] or "").strip()
+            try:
+                scheduled = parse_beijing_datetime(raw_time)
+            except ValueError:
+                # 老数据损坏时不能让后台线程反复尝试；由执行器之外的
+                # 诊断/日志继续保留原值，下一次人工修复前不领取它。
+                continue
+            if scheduled > reference:
+                continue
+            token = str(run_id or "").strip()
+            if not token:
+                token = f"scheduled-{int(row['id'])}-{int(time.time() * 1000)}"
+            now_text = reference.isoformat(timespec="seconds")
+            with self.conn:
+                updated = self.conn.execute(
+                    "UPDATE publish_jobs SET status = 'running', "
+                    "current_step = 'publishing', run_id = ?, updated_at = ? "
+                    "WHERE id = ? AND status = 'queued' AND current_step = 'scheduled'",
+                    (token, now_text, int(row["id"])),
+                )
+            if updated.rowcount == 1:
+                claimed = dict(row)
+                claimed.update({
+                    "status": "running", "current_step": "publishing",
+                    "run_id": token, "updated_at": now_text,
+                })
+                return self._job_view(claimed)
+        return None
+
+    def finish_publish_job(self, job_id: int, *, published: bool,
+                           error_code: str = "", error_message: str = "") -> None:
+        """记录定时发布最终结果，供重启后继续诊断。"""
+        status = "published" if published else "failed"
+        step = "completed" if published else "failed"
+        with self.conn:
+            self.conn.execute(
+                "UPDATE publish_jobs SET status = ?, current_step = ?, "
+                "error_code = ?, error_message = ?, updated_at = ? WHERE id = ?",
+                (status, step, str(error_code or "") or None,
+                 str(error_message or "") or None, _now(), int(job_id)),
+            )
 
     def delete_draft(self, draft_id: int) -> None:
         draft_id = int(draft_id)

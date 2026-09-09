@@ -540,12 +540,13 @@ class LiveCollector(Collector):
 
 
 class HybridCollector(Collector):
-    """同时承载 BitBrowser 平台和普通 Chrome 微博测试会话。"""
+    """同时承载 BitBrowser 平台、普通 Chrome 会话和贴吧 API。"""
 
-    def __init__(self, live=None, weibo=None, bilibili=None, bb=None):
+    def __init__(self, live=None, weibo=None, bilibili=None, bb=None, tieba=None):
         self.live = live
         self.weibo = weibo
         self.bilibili = bilibili
+        self.tieba = tieba
         self.bb = bb
         self._browser_collectors = {}
 
@@ -581,10 +582,21 @@ class HybridCollector(Collector):
                     from bilibili_adapter import BilibiliChromeCollector
                     self._browser_collectors[key] = BilibiliChromeCollector(ws)
             return self._browser_collectors[key]
+        if platform == "tieba":
+            return self.tieba
         return self.weibo if platform == "weibo" else self.bilibili
 
     def search(self, keyword, platform, mode="standard", target_count=100, window_id=None,
                pause_event=None, cancel_event=None, search_sort="default"):
+        if platform == "tieba":
+            collector = self._platform_collector(platform, window_id)
+            if collector is None:
+                raise RuntimeError("贴吧 API 采集器未配置")
+            return collector.search(
+                keyword, platform, mode, target_count, window_id,
+                search_sort=search_sort, pause_event=pause_event,
+                cancel_event=cancel_event,
+            )
         if platform == "weibo":
             collector = self._platform_collector(platform, window_id)
             if collector is None:
@@ -610,14 +622,32 @@ class HybridCollector(Collector):
                               search_sort="default"):
         collector = self._platform_collector(platform, window_id)
         if collector is None:
-            raise RuntimeError(f"{platform} Chrome 会话未配置")
-        return collector.collect_with_comments(
-            keyword, target_count, mode, progress_callback=progress_callback,
-            pause_event=pause_event, cancel_event=cancel_event,
-            search_sort=search_sort)
+            raise RuntimeError(
+                "贴吧 API 采集器未配置" if platform == "tieba"
+                else f"{platform} Chrome 会话未配置"
+            )
+        # 微博/B站的旧适配器已经固定了 collect_with_comments 签名；贴吧
+        # 适配器才需要显式接收 platform/window_id。避免新增平台参数破坏旧平台。
+        kwargs = {
+            "progress_callback": progress_callback,
+            "pause_event": pause_event,
+            "cancel_event": cancel_event,
+            "search_sort": search_sort,
+        }
+        if platform == "tieba":
+            kwargs.update({"platform": platform, "window_id": window_id})
+        return collector.collect_with_comments(keyword, target_count, mode, **kwargs)
 
     def fetch_comments(self, vid, account, url="", platform=None, window_id=None,
                        pause_event=None, cancel_event=None):
+        if platform == "tieba":
+            collector = self._platform_collector(platform, window_id)
+            if collector is None:
+                raise RuntimeError("贴吧 API 采集器未配置")
+            return collector.fetch_comments(
+                vid, account, url, platform, window_id,
+                pause_event=pause_event, cancel_event=cancel_event,
+            )
         if platform == "weibo":
             collector = self._platform_collector(platform, window_id)
             if collector is None:
@@ -652,6 +682,10 @@ class HybridCollector(Collector):
     def shutdown(self):
         if self.live:
             self.live.shutdown()
+        for collector in (self.tieba,):
+            shutdown = getattr(collector, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
 
 
 # ---------------------------------------------------------------------------

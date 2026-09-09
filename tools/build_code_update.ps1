@@ -26,19 +26,18 @@ foreach ($rootName in @('src', 'assets', 'lib')) {
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
         throw "Required code directory is missing: $rootName"
     }
-    Copy-Item -LiteralPath $sourcePath -Destination $payload -Recurse -Force
+    $targetPath = Join-Path $payload $rootName
+    New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+    Copy-Item -Path (Join-Path $sourcePath '*') -Destination $targetPath -Recurse -Force
+    Get-ChildItem -LiteralPath $targetPath -Recurse -Force -File | Where-Object { $_.Extension -in @('.pyc', '.pyo') -or $_.DirectoryName -like '*\__pycache__*' } | Remove-Item -Force
+    Get-ChildItem -LiteralPath $targetPath -Recurse -Force -Directory -Filter '__pycache__' | Sort-Object FullName -Descending | Remove-Item -Recurse -Force
 }
 
-foreach ($fileName in @('VERSION.txt', 'requirements.txt', 'requirements-v2.txt', 'monitor_gui.ps1')) {
+foreach ($fileName in @('VERSION.txt', 'BUILD_ID.txt', 'requirements.txt', 'requirements-v2.txt', 'monitor_gui.ps1', 'update.ps1')) {
     $sourcePath = Join-Path $sourceFull $fileName
     if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
         Copy-Item -LiteralPath $sourcePath -Destination $payload -Force
     }
-}
-
-foreach ($generated in @(Get-ChildItem -LiteralPath $payload -Recurse -Force -File |
-    Where-Object { $_.FullName -match '[\\/]+__pycache__[\\/]+|\.pyc$|\.pyo$' })) {
-    Remove-Item -LiteralPath $generated.FullName -Force
 }
 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'apply_code_update.ps1') -Destination $stage -Force

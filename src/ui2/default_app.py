@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""2.0 默认桌面入口。
+"""2.1.1 默认桌面入口。
 
 这个入口把 QML 界面和本地后台服务装配在同一个进程中：后台服务仍然通过
 本机回环 TCP 与界面通信，但不再要求用户先手动启动 ``backend_app.py``。
@@ -25,20 +25,31 @@ try:
     from PySide6.QtQuickControls2 import QQuickStyle
 except ImportError as exc:  # pragma: no cover - 取决于运行环境
     raise SystemExit(
-        "2.0 界面需要 PySide6，请先安装 requirements-v2.txt；"
+        "2.1.1 界面需要 PySide6，请先安装 requirements-v2.txt；"
         "旧版入口仍可使用。"
     ) from exc
 
-HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECT_ROOT = os.path.dirname(HERE)
+if getattr(sys, "frozen", False):
+    # PyInstaller 的入口脚本在发布包根目录下运行，不能再按源码文件的
+    # ``src/ui2`` 层级反推项目根目录。资源与可写数据也要分开：资源从
+    # _MEIPASS 读取（兼容 one-file），数据写到 EXE 所在目录（onedir）。
+    PROJECT_ROOT = os.path.dirname(os.path.abspath(sys.executable))
+    RESOURCE_ROOT = getattr(sys, "_MEIPASS", PROJECT_ROOT)
+    HERE = os.path.join(RESOURCE_ROOT, "src")
+else:
+    HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    PROJECT_ROOT = os.path.dirname(HERE)
+    RESOURCE_ROOT = PROJECT_ROOT
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 try:
+    from app_version import APP_VERSION  # type: ignore
     from backend_app import DEFAULT_DB, DEFAULT_ENDPOINT, start_service  # type: ignore
     from ui2.bridge import Ui2Bridge  # type: ignore
     from ui2.qml_app import QmlBridge  # type: ignore
 except ImportError:  # pragma: no cover - 支持以包形式导入
+    from ..app_version import APP_VERSION  # type: ignore
     from ..backend_app import DEFAULT_DB, DEFAULT_ENDPOINT, start_service  # type: ignore
     from .bridge import Ui2Bridge  # type: ignore
     from .qml_app import QmlBridge  # type: ignore
@@ -56,7 +67,7 @@ def write_heartbeat(path: str = HEARTBEAT_PATH) -> None:
     content = (
         f"pid={os.getpid()} "
         f"ts={datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
-        f"threads={threading.active_count()} mode=2.0\n"
+        f"threads={threading.active_count()} mode={APP_VERSION}\n"
     )
     try:
         with open(temporary, "w", encoding="utf-8") as stream:
@@ -154,12 +165,12 @@ def apply_windows_window_icon(window, icon_path: str) -> None:
 
 
 def restore_window_to_visible_screen(window) -> None:
-    """把被多屏布局带到屏幕外的主窗口拉回当前主屏。
+    """把主窗口限制在当前主屏，并修正多屏布局导致的屏外位置。
 
     Qt/Windows 可能沿用上一次的窗口位置。显示器拔出、远程桌面切换或
     分辨率变化后，窗口仍可能保留负坐标，进程和心跳都正常但用户看不到
-    界面。只有在窗口与当前主屏完全不相交时才修正位置，正常的用户布局
-    不会被覆盖。
+    界面。正常尺寸且仍在当前主屏内的用户布局不会被覆盖；只有尺寸超出
+    屏幕或窗口已经移到屏外时才会重新居中。
     """
     try:
         app = QGuiApplication.instance()
@@ -169,11 +180,14 @@ def restore_window_to_visible_screen(window) -> None:
         available = primary.availableGeometry()
         frame = window.frameGeometry()
         intersection = frame.intersected(available)
-        if intersection.width() >= 80 and intersection.height() >= 80:
-            return
-
+        # 默认窗口为总览首屏预留了更大的工作区，但在小分辨率或远程
+        # 桌面环境下必须先按可用屏幕尺寸收缩，避免窗口打开后被截断。
         width = min(max(window.width(), 1100), available.width())
         height = min(max(window.height(), 720), available.height())
+        size_changed = window.width() != width or window.height() != height
+        if intersection.width() >= 80 and intersection.height() >= 80 and not size_changed:
+            return
+
         x = available.left() + max(0, (available.width() - width) // 2)
         y = available.top() + max(0, (available.height() - height) // 2)
         window.setGeometry(x, y, width, height)
@@ -182,9 +196,9 @@ def restore_window_to_visible_screen(window) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="多平台采集工作台 2.0 默认界面")
-    parser.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
-    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help=argparse.SUPPRESS)
+    parser = argparse.ArgumentParser(description=f"多平台采集工作台 {APP_VERSION} 默认界面")
+    parser.add_argument("--db", default=os.path.join(PROJECT_ROOT, "data", "platform_gui.db"), help=argparse.SUPPRESS)
+    parser.add_argument("--endpoint", default=os.path.join(PROJECT_ROOT, "data", "backend_endpoint.json"), help=argparse.SUPPRESS)
     parser.add_argument("--demo", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--snapshot-interval", type=float, default=0.5, help=argparse.SUPPRESS)
     # 只供自动化冒烟测试使用，不影响日常启动。
@@ -223,17 +237,18 @@ def main(argv: list[str] | None = None) -> int:
         app.setFont(QFont("Microsoft YaHei UI", 10))
         # 使用发布包内的用户版高清工作台图标，保证窗口标题栏和任务栏图标
         # 与左侧品牌图标一致；不依赖用户电脑上的 Pictures 路径。
-        app_icon_path = os.path.join(PROJECT_ROOT, "assets", "user_app_icon.ico")
+        app_icon_path = os.path.join(RESOURCE_ROOT, "assets", "user_app_icon.ico")
         if os.path.exists(app_icon_path):
             app.setWindowIcon(QIcon(app_icon_path))
         engine = QQmlApplicationEngine()
         qml_bridge = QmlBridge(client_bridge)
         engine.rootContext().setContextProperty("backend", qml_bridge)
-        qml_path = os.path.join(os.path.dirname(__file__), "qml", "main.qml")
+        qml_path = os.path.join(RESOURCE_ROOT, "src", "ui2", "qml", "main.qml")
         engine.load(QUrl.fromLocalFile(qml_path))
         if not engine.rootObjects():
             return 2
         root_window = engine.rootObjects()[0]
+        root_window.setProperty("appVersion", APP_VERSION)
         root_window.setIcon(QIcon(app_icon_path))
         apply_windows_window_icon(root_window, app_icon_path)
         apply_windows_dark_titlebar(root_window)
@@ -253,7 +268,9 @@ def main(argv: list[str] | None = None) -> int:
         heartbeat_timer.start()
         write_heartbeat(heartbeat_path)
 
-        client_bridge.connect_async()
+        # 连接后台后尝试恢复“记住登录状态”的会话；恢复成功会沿用
+        # 正常登录回调，重新设置员工数据范围并拉取账号/任务/线索快照。
+        client_bridge.connect_async(lambda _view: qml_bridge.restoreAuthSession())
         if args.quit_after_ms > 0:
             QTimer.singleShot(args.quit_after_ms, app.quit)
         return int(app.exec())

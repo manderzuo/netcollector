@@ -73,6 +73,25 @@ class TestAuthStore(unittest.TestCase):
         self.assertEqual(protected.exception.code, "forbidden")
         self.assertEqual(self.store.get(first["id"])["username"], "worker")
 
+    def test_session_round_trip_and_revoke_without_password_storage(self):
+        created = self.store.register("worker-session", "123456", "会话员工")
+        self.store.approve(created["id"])
+        token = self.store.create_session(created["id"])
+        self.assertGreaterEqual(len(token), 24)
+        restored = self.store.get_session_user(token)
+        self.assertEqual(restored["username"], "worker-session")
+        self.store.revoke_session(token)
+        self.assertIsNone(self.store.get_session_user(token))
+        conn = self.store._connect()
+        try:
+            row = conn.execute(
+                "SELECT token_hash FROM app_sessions WHERE user_id = ?",
+                (created["id"],),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertNotEqual(row[0], token)
+
 
 if __name__ == "__main__":
     unittest.main()

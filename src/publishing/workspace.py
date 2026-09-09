@@ -377,6 +377,17 @@ class PublishingWorkspaceService:
         item["score"] = _json(item.pop("score_json", "{}"), {})
         return item
 
+    def delete_generated(self, generated_id: int) -> None:
+        """删除一条尚未导入发布草稿的生成内容。"""
+        generated_id = int(generated_id)
+        with self.conn:
+            cursor = self.conn.execute(
+                "DELETE FROM generated_contents WHERE id = ?",
+                (generated_id,),
+            )
+        if cursor.rowcount <= 0:
+            raise ValueError("生成内容不存在")
+
     def upsert_messages(self, account_id: int, platform: str,
                         items: list[Mapping[str, Any]] | None) -> dict[str, int]:
         """写入一次账号级全量消息同步结果。

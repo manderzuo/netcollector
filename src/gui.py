@@ -1164,7 +1164,20 @@ class GuiApp:
                     conn = self._lead_conn()
                     lead_repo = LeadRepository(conn)
                     inter_repo = InteractionRepository(conn)
-                    reply_adapter = BitBrowserReplyAdapter(self.bb) if self.bb is not None else None
+                    browser_reply_adapter = BitBrowserReplyAdapter(self.bb) if self.bb is not None else None
+                    tieba_reply_adapter = None
+                    tieba_collector = getattr(getattr(self.sched, "collector", None), "tieba", None)
+                    if tieba_collector is not None and hasattr(tieba_collector, "_client"):
+                        try:
+                            from interactions.tieba_reply import TiebaReplyAdapter, RoutingReplyAdapter
+                            tieba_reply_adapter = TiebaReplyAdapter(tieba_collector._client)
+                        except Exception:
+                            tieba_reply_adapter = None
+                    try:
+                        from interactions.tieba_reply import RoutingReplyAdapter
+                        reply_adapter = RoutingReplyAdapter(browser_reply_adapter, tieba_reply_adapter)
+                    except Exception:
+                        reply_adapter = browser_reply_adapter or tieba_reply_adapter
                     service = InteractionService(
                         inter_repo, lead_repo, reply_adapter=reply_adapter
                     )
@@ -1273,6 +1286,29 @@ class GuiApp:
                 else:
                     self._log(f"账号 {name} 没有绑定浏览器窗口，继续尝试定位")
 
+                try:
+                    from config_loader import AppConfig
+                    interaction_config = AppConfig().interaction() or {}
+                    reply_cooldown = float(
+                        interaction_config.get("batch_reply_cooldown_seconds", 5.0)
+                    )
+                    long_cooldown = float(
+                        interaction_config.get(
+                            "batch_reply_long_cooldown_seconds", 60.0
+                        )
+                    )
+                    long_cooldown_every = int(
+                        interaction_config.get(
+                            "batch_reply_long_cooldown_every", 10
+                        )
+                    )
+                except (ImportError, TypeError, ValueError):
+                    reply_cooldown = 5.0
+                    long_cooldown = 60.0
+                    long_cooldown_every = 10
+                reply_cooldown = max(0.0, min(30.0, reply_cooldown))
+                long_cooldown = max(0.0, min(300.0, long_cooldown))
+                long_cooldown_every = max(1, min(1000, long_cooldown_every))
                 for index, draft_id in enumerate(draft_ids, start=1):
                     try:
                         # 批量过程中关闭开关会立即阻止后续项目真实发送；
@@ -1304,7 +1340,19 @@ class GuiApp:
                             presenter.mark_reply_failed(draft_id, str(exc), account_id)
                         except Exception:
                             pass
-                    time.sleep(0.35)
+                    if index < len(draft_ids):
+                        if index % long_cooldown_every == 0 and long_cooldown > 0:
+                            self._log(
+                                f"批量互动长冷却：已连续处理 {index} 条，"
+                                f"等待 {long_cooldown:g} 秒后继续"
+                            )
+                            time.sleep(long_cooldown)
+                        elif reply_cooldown > 0:
+                            self._log(
+                                f"批量互动冷却：草稿#{draft_id} 已处理，"
+                                f"等待 {reply_cooldown:g} 秒后切换下一条"
+                            )
+                            time.sleep(reply_cooldown)
             except Exception as exc:  # noqa: BLE001
                 self._log(f"待发送池回复中止: {exc}")
             finally:
@@ -2797,13 +2845,14 @@ class GuiApp:
         try:
             rep = self.sched.status_report()
             for _account_key, a in rep.get("accounts", {}).items():
-                name = a.get("name", "")
-                # 已绑定 = name 是昵称(非窗口名/演示账号名)
+                raw_name = a.get("name", "")
+                name = a.get("nickname") or raw_name
+                # 账号展示使用平台昵称；任务绑定仍由 scheduler 内部使用 name。
                 if name in ("演示账号1", "演示账号2", "演示账号3"):
                     continue
                 plat = a.get("platform") or "douyin"
                 wid = a.get("bb_window_id") or ""
-                bound.setdefault(plat, []).append({"name": name, "wid": wid})
+                bound.setdefault(plat, []).append({"name": name, "key": raw_name, "wid": wid})
             status_ok = True
         except Exception as e:
             self._log(f"读取账号状态失败，尝试数据库兜底：{e}")
@@ -2813,21 +2862,22 @@ class GuiApp:
         # 账号展示不能依赖 BitBrowser 是否在线。
         try:
             conn = db.init_db(self.db_path, check_same_thread=False)
-            cur = conn.execute("SELECT name, bb_window_id, platform FROM accounts ORDER BY id")
+            cur = conn.execute("SELECT name, nickname, bb_window_id, platform FROM accounts ORDER BY id")
             existing = {(item.get("name"), str(item.get("wid") or ""))
                         for items in bound.values() for item in items}
             for row in cur.fetchall():
                 # 同时兼容 sqlite3.Row 与普通 tuple，避免数据库连接配置差异导致整批账号被吞掉。
                 try:
-                    name = row["name"]
+                    raw_name = row["name"]
+                    name = row["nickname"] or raw_name
                     wid = str(row["bb_window_id"] or "")
                     plat = row["platform"] or "douyin"
                 except (TypeError, IndexError):
-                    name, wid, plat = row[0], str(row[1] or ""), row[2] or "douyin"
+                    raw_name, name, wid, plat = row[0], row[1] or row[0], str(row[2] or ""), row[3] or "douyin"
                 if name in ("演示账号1", "演示账号2", "演示账号3") or not wid:
                     continue
-                if (name, wid) not in existing:
-                    bound.setdefault(plat, []).append({"name": name, "wid": wid})
+                if (raw_name, wid) not in existing:
+                    bound.setdefault(plat, []).append({"name": name, "key": raw_name, "wid": wid})
             conn.close()
         except Exception as e:
             self._log(f"数据库账号读取失败：{type(e).__name__}: {e}")
@@ -2864,7 +2914,7 @@ class GuiApp:
                     ws = lines[-1] if lines else None
             if not ws:
                 return {}
-            return account_reader.read_account(platform, ws)
+            return account_reader.read_account(platform, ws, expected_uid=name)
         except Exception:
             return {}
 
@@ -3118,11 +3168,18 @@ class GuiApp:
             except Exception:
                 pass
             return
-        nick = acc.get("nick") or acc.get("uid") or acc.get("sec_uid") or ""
+        nick = acc.get("nick") or acc.get("nickname") or acc.get("display_name") or ""
         if not nick:
-            nick = f"{plat}账号"
+            self._ui_call(lambda: messagebox.showwarning(
+                "提示", "已确认登录，但没有读取到平台昵称；未使用用户 ID 代替昵称，请重试"
+            ))
+            try:
+                self._ui_call(self.refresh_window_list)
+            except Exception:
+                pass
+            return
         try:
-            self.sched.add_account(nick, bb_window_id=wid, platform=plat_en)
+            self.sched.add_account(nick, bb_window_id=wid, platform=plat_en, nickname=nick)
             self._ui_call(lambda: self._log(f"✅ 已绑定账号: {plat}·{nick}"))
             self._ui_call(lambda: messagebox.showinfo(
                 "绑定成功", f"{plat}·{nick} 已绑定，可用于采集任务"))
@@ -3138,11 +3195,19 @@ class GuiApp:
         vals = self._selected_account_values()
         if not vals:
             return
-        name = vals[0]
-        if "·" in name:
-            name = name.split("·", 1)[1]
+        wid = str(vals[4] or "")
+        name = str(vals[0] or "")
         try:
-            self.sched.remove_account(name)
+            account = next(
+                (item for item in self.sched.status_report().get("accounts", {}).values()
+                 if str(item.get("bb_window_id") or "") == wid),
+                None,
+            )
+            if account:
+                self.sched.remove_account(account_id=account.get("id"))
+                name = str(account.get("nickname") or account.get("name") or name)
+            else:
+                self.sched.remove_account(name)
             self._log(f"🗑 已解除绑定: {name}")
         except Exception as e:
             self._log(f"解除绑定失败: {e}")
@@ -3188,7 +3253,7 @@ class GuiApp:
             bound_account = next((a for a in accounts.values()
                                   if str(a.get("bb_window_id") or "") == wid), None)
             if bound_account:
-                display_name = bound_account.get("name") or display_name
+                display_name = bound_account.get("nickname") or bound_account.get("name") or display_name
         except Exception:
             pass
         try:
@@ -3957,7 +4022,7 @@ class GuiApp:
             current_status = selected.get("status", "")
         except Exception:
             pass
-        human_waiting = self._task_has_waiting_human(task_id)
+        human_waiting = self._task_has_waiting_human(task_id) or self._task_has_human_reason(selected)
         running_states = {"phase_a_search", "phase_b_comments", "running"}
         paused_states = {"paused", "incomplete", "failed", "no_account", "waiting_account"}
         pending_states = {"pending"}
@@ -4069,6 +4134,17 @@ class GuiApp:
             return bool(self.sched.waiting_accounts_for_task(int(tid)))
         except Exception:
             return False
+
+    @staticmethod
+    def _task_has_human_reason(task):
+        if not isinstance(task, dict):
+            return False
+        run = task.get("latest_run") or {}
+        reason = " ".join(str(value or "") for value in (
+            task.get("error_reason"), task.get("error_message"),
+            run.get("stop_reason"),
+        ))
+        return "人工" in reason or "验证" in reason
 
     def _start_task_worker(self, tid):
         try:
@@ -4634,7 +4710,7 @@ class GuiApp:
         info = ctk.CTkFrame(top, fg_color="transparent")
         info.pack(side="left", fill="x", expand=True)
         status = task.get("status", "")
-        human_waiting = self._task_has_waiting_human(tid)
+        human_waiting = self._task_has_waiting_human(tid) or self._task_has_human_reason(task)
         title_label = ctk.CTkLabel(
             info,
             text=f"{task.get('keyword', '')}", text_color=COLORS["text"], font=FONTS["card_title"],
@@ -4906,6 +4982,8 @@ class GuiApp:
 
     def _task_display_status(self, task) -> str:
         status = task.get("status", "")
+        if self._task_has_human_reason(task):
+            return "待人工验证"
         if self._task_needs_more_after_exhausted(task):
             return "暂无更多视频"
         if status in ("phase_a_search", "phase_b_comments", "running"):
@@ -4936,7 +5014,7 @@ class GuiApp:
             ref["progress"].configure(text=f"{done} / {collected_total}")
             ref["bar"].set(min(1.0, done / target))
             status = task.get("status", "")
-            human_waiting = self._task_has_waiting_human(tid)
+            human_waiting = self._task_has_waiting_human(tid) or self._task_has_human_reason(task)
             no_more_videos = self._task_needs_more_after_exhausted(task)
             status_text = self._task_display_status(task)
             fg, bg = status_palette(status)

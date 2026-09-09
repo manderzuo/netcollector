@@ -28,7 +28,8 @@ function Get-AllowedPath([string]$Relative) {
     $top = $Relative.Split('\')[0].ToLowerInvariant()
     if ($top -in @('src', 'assets', 'lib')) { return $true }
     return $Relative -in @(
-        'VERSION.txt', 'requirements.txt', 'requirements-v2.txt', 'monitor_gui.ps1'
+        'VERSION.txt', 'BUILD_ID.txt', 'requirements.txt', 'requirements-v2.txt',
+        'monitor_gui.ps1', 'update.ps1'
     )
 }
 
@@ -188,6 +189,7 @@ try {
     }
     Write-Message ("Update completed: version " + $version)
     Write-Message ("Code backup: " + $backupRoot)
+    Write-Message 'Personal data is preserved; restart will reload existing accounts and tasks.'
 } catch {
     Write-Message 'Update failed; restoring the previous code files.'
     foreach ($entry in $backupEntries) {

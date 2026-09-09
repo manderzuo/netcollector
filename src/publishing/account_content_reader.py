@@ -58,6 +58,21 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _content_title(value: Any, content_id: str, url: str) -> str:
+    """清理主页卡片标题，避免把作品 ID/纯统计数字显示成标题。"""
+    title = _clean_text(value)
+    if not title:
+        return "未命名内容"
+    # 这里不依赖平台正则的调用方状态，只比较 URL 的最后一段和已解析 ID。
+    url_tail = urlsplit(str(url or "").split("?", 1)[0].rstrip("/")).path.rsplit("/", 1)[-1]
+    if title == str(content_id or "") or (url_tail and title == url_tail):
+        return "未命名内容"
+    # 页面没有标题时，部分平台会把纯数字的作品编号或统计值塞进 title。
+    if re.fullmatch(r"[\d.,万亿Kk+]+", title):
+        return "未命名内容"
+    return title
+
+
 def _safe_count(value: Any) -> int:
     """统计字段来自页面文本，异常占位符不能让整次同步失败。"""
     if isinstance(value, bool):
@@ -119,7 +134,7 @@ def normalize_profile_items(platform: str, raw_items: Any, *, limit: int = 100) 
             "content_id": content_id,
             "content_type": content_type,
             "url": url,
-            "title": _clean_text(raw.get("title")) or "未命名内容",
+            "title": _content_title(raw.get("title"), content_id, url),
             "description": _clean_text(raw.get("description")),
             "cover_url": _clean_text(raw.get("cover_url")),
             "published_at": _clean_text(raw.get("published_at")) or None,
@@ -313,7 +328,9 @@ def _reader_js(platform: str) -> str:
         for (const line of lines) add(line);
         add(card.innerText || '');
         add(anchor.innerText || '');
-        return candidates.find(value => value.length <= 240 && !statOnly(value)) || candidates[0] || '';
+        // 没有可用标题时返回空值，由 Python 统一展示“未命名内容”；
+        // 不能退回 candidates[0]，否则作品 ID/点赞数会被误当成标题。
+        return candidates.find(value => value.length <= 240 && !statOnly(value)) || '';
       };
       const cards = [];
       const seen = new Set();

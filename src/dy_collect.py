@@ -33,7 +33,12 @@ except ImportError:
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.cdp import CdpSession
+try:
+    # 源码包运行时使用相对导入；PyInstaller 将入口依赖收进顶层时，
+    # 回退到顶层模块名，避免 live_collector 导入链启动失败。
+    from .cdp import CdpSession
+except ImportError:
+    from cdp import CdpSession
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "out")
 

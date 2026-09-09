@@ -80,9 +80,13 @@ CREATE TABLE IF NOT EXISTS videos (
 CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,                  -- 账号/窗口名
+  nickname TEXT,                       -- 平台实际昵称（与内部账号/窗口标识分离）
+  platform_user_id TEXT,               -- 已确认的平台用户 ID（用于稳定归属校验）
   bb_window_id TEXT,                   -- BitBrowser 窗口 ID
   platform TEXT NOT NULL DEFAULT 'douyin',
   status TEXT NOT NULL DEFAULT 'idle', -- idle|working|cooldown|waiting_human|frozen|dead
+  runtime_owner TEXT,                  -- 当前采集进程租约（进程异常退出后用于识别残留状态）
+  runtime_heartbeat TEXT,              -- 当前采集进程最近一次心跳
   processed_count INTEGER NOT NULL DEFAULT 0,
   batch_count INTEGER NOT NULL DEFAULT 0,  -- 当前批次已采数（10 触发冷却）
   cd_until TEXT,                       -- 冷却截止时间 (ISO)
@@ -155,6 +159,21 @@ def init_db(db_path: str = None, check_same_thread: bool = True) -> sqlite3.Conn
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA_SQL)
     task_cols = {r[1] for r in conn.execute("PRAGMA table_info('tasks')").fetchall()}
+    account_cols = {r[1] for r in conn.execute("PRAGMA table_info('accounts')").fetchall()}
+    if "nickname" not in account_cols:
+        # 旧版本把账号标识、窗口名和平台昵称混在 name 中。新增独立字段，
+        # 只扩展表结构，不改写旧数据，保证升级不影响任务绑定。
+        conn.execute("ALTER TABLE accounts ADD COLUMN nickname TEXT")
+    if "platform_user_id" not in account_cols:
+        # 账号名称可能是窗口名，不能长期承担平台 UID 的作用。
+        # 新字段只增加稳定归属信息，不改动旧账号绑定和任务依赖的 name。
+        conn.execute("ALTER TABLE accounts ADD COLUMN platform_user_id TEXT")
+    if "runtime_owner" not in account_cols:
+        # 账号运行状态必须能区分“当前进程占用”和“上次异常退出残留”。
+        # 该列只用于运行时租约，不改变账号标识或任务绑定。
+        conn.execute("ALTER TABLE accounts ADD COLUMN runtime_owner TEXT")
+    if "runtime_heartbeat" not in account_cols:
+        conn.execute("ALTER TABLE accounts ADD COLUMN runtime_heartbeat TEXT")
     if "collect_mode" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN collect_mode TEXT NOT NULL DEFAULT 'standard'")
     if "search_sort" not in task_cols:
@@ -488,7 +507,7 @@ def get_videos_by_status(conn: sqlite3.Connection, task_id: int, status: str) ->
 # ---------------------------------------------------------------- 账号
 
 def upsert_account(conn: sqlite3.Connection, name: str, bb_window_id: str = None,
-                   platform: str = "douyin") -> int:
+                   platform: str = "douyin", nickname: str = None) -> int:
     """按平台和窗口/昵称幂等写入，避免跨平台同名账号互相覆盖。"""
     row = None
     if bb_window_id:
@@ -502,18 +521,37 @@ def upsert_account(conn: sqlite3.Connection, name: str, bb_window_id: str = None
             (platform, name),
         ).fetchone()
     if row is not None:
+        fields = ["bb_window_id = ?", "platform = ?"]
+        values = [bb_window_id, platform]
+        if str(nickname or "").strip():
+            fields.append("nickname = ?")
+            values.append(str(nickname).strip())
+        values.append(row["id"])
         conn.execute(
-            "UPDATE accounts SET bb_window_id = ?, platform = ? WHERE id = ?",
-            (bb_window_id, platform, row["id"]),
+            "UPDATE accounts SET %s WHERE id = ?" % ", ".join(fields),
+            tuple(values),
         )
         conn.commit()
         return row["id"]
     cur = conn.execute(
-        "INSERT INTO accounts (name, bb_window_id, platform) VALUES (?, ?, ?)",
-        (name, bb_window_id, platform),
+        "INSERT INTO accounts (name, nickname, bb_window_id, platform) VALUES (?, ?, ?, ?)",
+        (name, str(nickname or "").strip() or None, bb_window_id, platform),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def update_account_nickname(conn: sqlite3.Connection, account_id: int,
+                            nickname: str) -> None:
+    """保存平台实际昵称，不改动任务依赖的内部账号标识 ``name``。"""
+    value = str(nickname or "").strip()
+    if not value:
+        return
+    conn.execute(
+        "UPDATE accounts SET nickname = ? WHERE id = ?",
+        (value, int(account_id)),
+    )
+    conn.commit()
 
 
 def update_account_status(conn: sqlite3.Connection, account_id: int, status: str,
@@ -529,6 +567,14 @@ def update_account_status(conn: sqlite3.Connection, account_id: int, status: str
     if wait_since is not None:
         fields.append("wait_since = ?")
         values.append(wait_since)
+    # 非运行态不能继续保留旧进程租约，否则下次启动会误判账号仍在工作。
+    if status == "idle":
+        fields.extend([
+            "cd_until = NULL", "wait_reason = NULL", "wait_since = NULL",
+            "runtime_owner = NULL", "runtime_heartbeat = NULL",
+        ])
+    elif status in ("waiting_human", "frozen", "dead"):
+        fields.extend(["runtime_owner = NULL", "runtime_heartbeat = NULL"])
     values.append(account_id)
     conn.execute(
         "UPDATE accounts SET %s WHERE id = ?" % ", ".join(fields), tuple(values)
@@ -557,6 +603,8 @@ def reset_batch(conn: sqlite3.Connection, account_id: int) -> None:
     )
     conn.execute(
         "UPDATE accounts SET cd_until = NULL, status = 'idle' "
+        ", runtime_owner = NULL, runtime_heartbeat = NULL, "
+        "wait_reason = NULL, wait_since = NULL "
         "WHERE id = ? AND cd_until IS NOT NULL AND cd_until <= ? AND status = 'cooldown'",
         (account_id, _now_iso()),
     )

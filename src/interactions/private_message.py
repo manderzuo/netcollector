@@ -111,6 +111,229 @@ def _same_page_url(current_url: str, target_url: str) -> bool:
                 current_host == target_host and current_path == target_path)
 
 
+PRIVATE_MESSAGE_PAGE_WAIT_SECONDS = 12.0
+PRIVATE_MESSAGE_SCRIPT_RETRY_COUNT = 2
+PRIVATE_MESSAGE_RETRY_STAGES = frozenset({
+    "private_message_target_page_not_ready",
+    "private_message_button_not_found",
+    "private_message_input_not_found",
+    "private_message_fill_unverified",
+})
+
+
+def _private_page_score(page: Any, target: PrivateMessageTarget) -> int:
+    """给私信窗口中的 page target 排序，避免附着到导航/控制台页。
+
+    BitBrowser 的 browser-level CDP 可能同时暴露控制台页、创作者中心页、
+    旧的消息页和真正的平台页。旧实现直接取第一个 page，页面切换较快时
+    就会在错误的 DOM 上点击私信按钮。这里先按 URL 选页，随后仍会强制导航
+    到目标用户主页。
+    """
+    if not isinstance(page, dict) or str(page.get("type") or "") != "page":
+        return -100000
+    raw_url = str(page.get("url") or "").strip()
+    parsed = urlsplit(raw_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in {"http", "https"} or not host:
+        return -100000
+    if host in {"console.bitbrowser.net", "bitbrowser.net"}:
+        return -100000
+    if str(target.platform or "").lower() == "douyin" and host == "creator.douyin.com":
+        return -100000
+    score = 10
+    if _same_page_url(raw_url, target.profile_url or ""):
+        score += 300
+    elif _platform_host_matches(raw_url, target.platform):
+        score += 150
+    if page.get("attached"):
+        score += 2
+    return score
+
+
+def _private_page_state_script() -> str:
+    """返回轻量页面状态，供导航后的稳定性轮询和详细日志使用。"""
+    return r"""(() => {
+      const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const bodyText = clean(document.body?.innerText || '');
+      const controls = [...document.querySelectorAll('button,[role="button"],a')];
+      const privateButtonCount = controls.filter(el => {
+        const text = clean(el.innerText || el.textContent || el.getAttribute('aria-label') ||
+          el.getAttribute('title') || '');
+        const style = getComputedStyle(el), rect = el.getBoundingClientRect();
+        return /^(私信|发私信)$/.test(text) && style.display !== 'none' &&
+          style.visibility !== 'hidden' && rect.width > 3 && rect.height > 3;
+      }).length;
+      const privateNotice = /该账号为私密账号|该用户为私密账号|账号为私密账号|私密账号|私密账户|账号设为私密/.test(bodyText);
+      return {
+        url: location.href,
+        title: document.title,
+        readyState: document.readyState,
+        visible: document.visibilityState === 'visible',
+        hidden: document.hidden,
+        timeOrigin: Number(performance.timeOrigin || 0),
+        bodyTextLength: bodyText.length,
+        privateButtonCount,
+        privateNotice,
+        hasFocus: document.hasFocus()
+      };
+    })()"""
+
+
+async def _attach_private_message_page(session, target: PrivateMessageTarget,
+                                       trace: DebugTrace) -> tuple[str, dict[str, Any]]:
+    """选择真实平台 page，绝不盲目附着 CDP 返回的第一个 page。"""
+    targets = await session.cmd("Target.getTargets", timeout=10.0)
+    pages = [item for item in (targets.get("targetInfos", []) if isinstance(targets, dict) else [])
+             if isinstance(item, dict) and item.get("type") == "page"]
+    trace.emit(
+        "page_targets_query_result",
+        total_targets=len(targets.get("targetInfos", [])) if isinstance(targets, dict) else 0,
+        page_count=len(pages),
+        pages=[{
+            "target_id": page.get("targetId"),
+            "url": page.get("url"),
+            "title": page.get("title"),
+            "attached": page.get("attached"),
+            "score": _private_page_score(page, target),
+        } for page in pages],
+    )
+    candidates = [page for page in pages if _private_page_score(page, target) > -100000]
+    if candidates:
+        selected = max(
+            candidates,
+            key=lambda page: (_private_page_score(page, target),
+                              str(page.get("targetId") or "")),
+        )
+        trace.emit(
+            "page_selection_decision",
+            reason="platform_or_target_url",
+            target_id=selected.get("targetId"),
+            page_url=selected.get("url", ""),
+            score=_private_page_score(selected, target),
+        )
+        attached = await session.cmd(
+            "Target.attachToTarget",
+            {"targetId": selected["targetId"], "flatten": True},
+            timeout=10.0,
+        )
+        sid = str(attached.get("sessionId") or "")
+        if not sid:
+            raise PrivateMessageError("私信页面附着失败")
+        await session.cmd("Page.enable", session_id=sid, timeout=10.0)
+        await session.cmd("Runtime.enable", session_id=sid, timeout=10.0)
+        current = await session.eval(_private_page_state_script(), sid, timeout=10.0)
+        trace.emit("page_attach_completed", session_id=sid, page=current)
+        return sid, current if isinstance(current, dict) else {}
+
+    # 只有控制台页或空白页时，才使用兼容性回退；后续仍会强制导航到目标页。
+    sid = await session.attach_page(create_if_missing=True)
+    current = await session.eval(_private_page_state_script(), sid, timeout=10.0)
+    trace.emit("page_attach_fallback", session_id=sid, reason="no_platform_page", page=current)
+    return sid, current if isinstance(current, dict) else {}
+
+
+async def _navigate_private_message_page(session, sid: str,
+                                         target: PrivateMessageTarget,
+                                         trace: DebugTrace, *, attempt: int,
+                                         reason: str,
+                                         settle_seconds: float) -> dict[str, Any]:
+    """每次尝试都回到目标主页，并等待 URL 与 DOM 同时稳定。"""
+    current = await session.eval(_private_page_state_script(), sid, timeout=10.0)
+    same_page_before = isinstance(current, dict) and _same_page_url(
+        current.get("url", ""), target.profile_url or ""
+    )
+    previous_time_origin = (current or {}).get("timeOrigin") if isinstance(current, dict) else None
+    trace.emit(
+        "navigation_requested",
+        attempt=attempt,
+        reason=reason,
+        from_page=current,
+        to_url=target.profile_url,
+    )
+    if same_page_before:
+        # 同一用户主页可能还残留上一次打开的私信弹层；仅再次 navigate 在
+        # 某些 SPA 页面上会保留旧 DOM。强制 reload，确保每一轮从干净页面开始。
+        trace.emit("page_reload_requested", attempt=attempt, reason="same_target_page")
+        await session.cmd(
+            "Page.reload", {"ignoreCache": False}, session_id=sid, timeout=15.0
+        )
+    else:
+        await session.navigate(target.profile_url or "", sid, wait_load=False)
+
+    deadline = asyncio.get_running_loop().time() + PRIVATE_MESSAGE_PAGE_WAIT_SECONDS
+    last_state: dict[str, Any] = {}
+    last_signature = None
+    stable_ready_probes = 0
+    probe = 0
+    while asyncio.get_running_loop().time() < deadline:
+        probe += 1
+        state = await session.eval(_private_page_state_script(), sid, timeout=10.0)
+        last_state = state if isinstance(state, dict) else {}
+        route_ok = isinstance(state, dict) and _same_page_url(
+            state.get("url", ""), target.profile_url or ""
+        )
+        dom_ready = str((state or {}).get("readyState") or "") in {"interactive", "complete"}
+        content_ready = bool(
+            (state or {}).get("privateButtonCount")
+            or (state or {}).get("privateNotice")
+            or int((state or {}).get("bodyTextLength") or 0) >= 40
+        )
+        signature = (
+            (state or {}).get("url"), (state or {}).get("readyState"),
+            (state or {}).get("privateButtonCount"),
+            (state or {}).get("privateNotice"),
+            (state or {}).get("bodyTextLength"),
+            (state or {}).get("timeOrigin"),
+        )
+        if probe == 1 or signature != last_signature or probe % 4 == 0:
+            trace.emit(
+                "private_page_ready_probe",
+                attempt=attempt,
+                probe=probe,
+                route_ok=route_ok,
+                dom_ready=dom_ready,
+                content_ready=content_ready,
+                page=state,
+            )
+        if route_ok and dom_ready and content_ready:
+            stable_ready_probes = (
+                stable_ready_probes + 1
+                if signature == last_signature else 1
+            )
+        else:
+            stable_ready_probes = 0
+        last_signature = signature
+        new_document = (
+            not same_page_before
+            or previous_time_origin in (None, 0)
+            or (state or {}).get("timeOrigin") != previous_time_origin
+        )
+        if (route_ok and dom_ready and content_ready
+                and stable_ready_probes >= 2
+                and (new_document or probe >= 10)):
+            break
+        await asyncio.sleep(0.25)
+
+    trace.emit(
+        "navigation_completed",
+        attempt=attempt,
+        page=last_state,
+        route_ok=_same_page_url(last_state.get("url", ""), target.profile_url or ""),
+        ready_state=last_state.get("readyState"),
+    )
+    try:
+        await session.cmd("Page.bringToFront", session_id=sid, timeout=5.0)
+        trace.emit("page_bring_to_front_completed", attempt=attempt)
+    except Exception as exc:
+        trace.exception("page_bring_to_front_failed", exc, attempt=attempt)
+    await asyncio.sleep(max(0.2, float(settle_seconds)))
+    return last_state
+
+
+def _private_message_result_should_retry(result: Any) -> bool:
+    return isinstance(result, dict) and str(result.get("stage") or "") in PRIVATE_MESSAGE_RETRY_STAGES
+
+
 class BitBrowserPrivateMessageAdapter(PrivateMessageAdapter):
     """通过 BitBrowser/CDP 定位个人主页并填入私信内容。"""
 
@@ -168,63 +391,103 @@ class BitBrowserPrivateMessageAdapter(PrivateMessageAdapter):
             raise PrivateMessageError("BitBrowser 未返回 CDP 连接地址")
 
         session = CdpSession(ws_url, timeout=35.0)
-        await session.connect()
-        trace.emit("cdp_connect_completed")
         try:
-            sid = await session.attach_page()
-            current = await session.eval(
-                "({url:location.href, title:document.title, visible:document.visibilityState === 'visible'})",
-                sid,
+            await session.connect()
+            trace.emit("cdp_connect_completed")
+            sid, current = await _attach_private_message_page(
+                session, target, trace
             )
             trace.emit("page_state_read", page=current)
-            if not isinstance(current, dict) or not _same_page_url(
-                    current.get("url", ""), target.profile_url or ""):
-                trace.emit(
-                    "navigation_requested",
-                    from_url=(current or {}).get("url", "") if isinstance(current, dict) else "",
-                    to_url=target.profile_url,
-                )
-                await session.navigate(target.profile_url, sid, wait_load=False)
-                navigation_page = None
-                for _ in range(24):
-                    await asyncio.sleep(0.25)
-                    navigation_page = await session.eval(
-                        "({url:location.href, title:document.title, visible:document.visibilityState === 'visible'})",
-                        sid,
+            result: Any = None
+            for attempt in range(1, PRIVATE_MESSAGE_SCRIPT_RETRY_COUNT + 1):
+                if attempt > 1:
+                    trace.emit(
+                        "private_message_retry_started",
+                        attempt=attempt,
+                        reason="页面状态或私信控件尚未稳定",
                     )
-                    if isinstance(navigation_page, dict) and _same_page_url(
-                            navigation_page.get("url", ""), target.profile_url or ""):
-                        break
-                trace.emit("navigation_completed", page=navigation_page)
-            try:
-                await session.cmd("Page.bringToFront", session_id=sid, timeout=5.0)
-            except Exception:
-                pass
-            await asyncio.sleep(self._settle_seconds)
-            result = await session.eval(
-                _private_message_script(
-                    target.nickname or "", target.platform_user_id or "", content,
-                    confirm, target.platform,
-                ),
-                sid,
-                timeout=45.0,
-            )
-            trace.emit("private_message_script_result", result=result)
-            if not isinstance(result, dict):
-                return ReplyActionResult(
-                    ok=False, stage="private_message_invalid_result",
-                    message="私信页面没有返回可识别结果", target=target,
+                    await asyncio.sleep(0.6)
+                navigation_page = await _navigate_private_message_page(
+                    session,
+                    sid,
+                    target,
+                    trace,
+                    attempt=attempt,
+                    reason=("initial_target_reset" if attempt == 1
+                            else "retry_target_reset"),
+                    settle_seconds=self._settle_seconds,
                 )
-            return ReplyActionResult(
-                ok=bool(result.get("ok")),
-                stage=str(result.get("stage") or "private_message_failed"),
-                message=str(result.get("message") or "私信操作未完成"),
-                verified=bool(result.get("verified")),
-                details=result,
-                target=target,
-            )
+                route_ok = isinstance(navigation_page, dict) and _same_page_url(
+                    navigation_page.get("url", ""), target.profile_url or ""
+                )
+                dom_ready = str((navigation_page or {}).get("readyState") or "") in {
+                    "interactive", "complete"
+                }
+                content_ready = bool(
+                    (navigation_page or {}).get("privateButtonCount")
+                    or (navigation_page or {}).get("privateNotice")
+                    or int((navigation_page or {}).get("bodyTextLength") or 0) >= 40
+                )
+                if not (route_ok and dom_ready and content_ready):
+                    result = {
+                        "ok": False,
+                        "verified": False,
+                        "stage": "private_message_target_page_not_ready",
+                        "message": "目标用户主页尚未稳定，未执行任何输入",
+                        "page": navigation_page,
+                        "trace": [{
+                            "step": "private_message_target_page_not_ready",
+                            "route_ok": route_ok,
+                            "dom_ready": dom_ready,
+                            "content_ready": content_ready,
+                        }],
+                    }
+                else:
+                    result = await session.eval(
+                        _private_message_script(
+                            target.nickname or "", target.platform_user_id or "", content,
+                            confirm, target.platform,
+                        ),
+                        sid,
+                        timeout=45.0,
+                    )
+                trace.emit(
+                    "private_message_script_result",
+                    attempt=attempt,
+                    result=result,
+                )
+                if not isinstance(result, dict):
+                    result = {
+                        "ok": False,
+                        "verified": False,
+                        "stage": "private_message_invalid_result",
+                        "message": "私信页面没有返回可识别结果",
+                        "trace": [],
+                    }
+                if (attempt < PRIVATE_MESSAGE_SCRIPT_RETRY_COUNT
+                        and _private_message_result_should_retry(result)):
+                    trace.emit(
+                        "private_message_retry_scheduled",
+                        attempt=attempt,
+                        stage=result.get("stage"),
+                        message=result.get("message"),
+                    )
+                    continue
+                return ReplyActionResult(
+                    ok=bool(result.get("ok")),
+                    stage=str(result.get("stage") or "private_message_failed"),
+                    message=str(result.get("message") or "私信操作未完成"),
+                    verified=bool(result.get("verified")),
+                    details=result,
+                    target=target,
+                )
+            raise PrivateMessageError("私信流程重试后仍未完成")
         finally:
-            await session.close()
+            try:
+                await session.close()
+            except Exception as exc:
+                # 点击发送后的关闭异常不应把已经确认的私信改写为失败。
+                trace.exception("cdp_session_close_failed", exc)
 
 
 def _private_message_script(nickname: str, user_id: str, content: str,
@@ -254,11 +517,10 @@ def _private_message_script(nickname: str, user_id: str, content: str,
     el.getAttribute('title') || el.getAttribute('placeholder') || ''
   );
   const record = (step, extra) => trace.push(Object.assign({{step}}, extra || {{}}));
-  const all = Array.from(document.querySelectorAll('button,[role="button"],a,span,div'));
   const userText = (target.nickname || target.userId || '').toLowerCase();
+  await sleep(300);
   const pageText = clean(document.body?.innerText || '').toLowerCase();
   if (userText && !pageText.includes(userText)) record('target_user_text_not_visible');
-  await sleep(300);
   const privateNoticeWords = /该账号为私密账号|该用户为私密账号|账号为私密账号|私密账号|私密账户|账号设为私密/;
   const privateNotice = Array.from(document.querySelectorAll('body *'))
     .filter(el => visible(el) && privateNoticeWords.test(label(el)))
@@ -282,7 +544,11 @@ def _private_message_script(nickname: str, user_id: str, content: str,
     : /^(发私信|私信|发送消息|发消息|联系他|联系对方)$/;
   const isControl = el => ['BUTTON','A','INPUT'].includes(el.tagName) ||
     el.getAttribute('role') === 'button';
-  const privateCandidates = all.filter(el => isControl(el) && visible(el) && enabled(el) &&
+  // 页面导航完成后仍可能继续挂载组件。每次探测都重新查询 DOM，不能沿用
+  // 导航前的 elements 快照，否则会出现“按钮偶尔找不到”的冷启动竞态。
+  const privateCandidates = () => Array.from(
+    document.querySelectorAll('button,[role="button"],a,span,div')
+  ).filter(el => isControl(el) && visible(el) && enabled(el) &&
     privateWords.test(label(el))).sort((a,b) => {{
       const score = el => {{
         const text = label(el);
@@ -296,16 +562,54 @@ def _private_message_script(nickname: str, user_id: str, content: str,
       }};
       return score(b) - score(a);
     }});
-  const privateButton = privateCandidates[0];
-  record('private_message_button_candidates', {{count:privateCandidates.length,
-    items:privateCandidates.slice(0, 8).map(el => {{ const r=el.getBoundingClientRect();
-      return {{text:label(el), tag:el.tagName, x:r.x, y:r.y, w:r.width, h:r.height}}; }})}});
-  if (!privateButton) return {{ok:false, verified:false,
+  const buttonSummary = candidates => candidates.slice(0, 8).map(el => {{
+    const r=el.getBoundingClientRect();
+    return {{text:label(el), tag:el.tagName, x:r.x, y:r.y, w:r.width, h:r.height}};
+  }});
+  let privateButton = null;
+  let latestCandidates = [];
+  let previousButtonSignature = '';
+  let stableButtonProbes = 0;
+  for (let attempt = 1; attempt <= 32; attempt++) {{
+    latestCandidates = privateCandidates();
+    const candidate = latestCandidates[0];
+    if (candidate) {{
+      const r = candidate.getBoundingClientRect();
+      const signature = [candidate.tagName, label(candidate),
+        Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)].join('|');
+      stableButtonProbes = signature === previousButtonSignature
+        ? stableButtonProbes + 1 : 1;
+      previousButtonSignature = signature;
+      record('private_message_button_probe', {{attempt, count:latestCandidates.length,
+        stableProbes:stableButtonProbes, candidate:{{text:label(candidate),
+          tag:candidate.tagName, x:r.x, y:r.y, w:r.width, h:r.height}}}});
+      if (stableButtonProbes >= 2) {{
+        privateButton = candidate;
+        break;
+      }}
+    }} else {{
+      stableButtonProbes = 0;
+      previousButtonSignature = '';
+      record('private_message_button_probe', {{attempt, count:0,
+        stableProbes:0, candidate:null}});
+    }}
+    await sleep(250);
+  }}
+  // 二次取最新节点，避免 React/Vue 重绘后继续使用已脱离 DOM 的按钮。
+  const freshPrivateButton = privateCandidates()[0];
+  if (freshPrivateButton) privateButton = freshPrivateButton;
+  latestCandidates = privateCandidates();
+  record('private_message_button_candidates', {{count:latestCandidates.length,
+    items:buttonSummary(latestCandidates)}});
+  if (!privateButton || !privateButton.isConnected || !visible(privateButton) || !enabled(privateButton)) return {{ok:false, verified:false,
     stage:'private_message_button_not_found', message:'未找到明确的私信按钮', trace}};
   record('private_message_button_selected', {{text:label(privateButton), tag:privateButton.tagName,
     rect:(() => {{ const r=privateButton.getBoundingClientRect(); return {{x:r.x,y:r.y,w:r.width,h:r.height}}; }})()}});
   privateButton.click();
-  record('private_message_button_clicked');
+  const afterClickUrl = location.href;
+  record('private_message_button_clicked', {{page:{{url:location.href, title:document.title,
+    readyState:document.readyState, visibility:document.visibilityState,
+    hidden:document.hidden}}}});
   const inputSelector = 'textarea,input:not([type="hidden"]):not([type="search"]),[contenteditable="true"],[role="textbox"],[data-placeholder]';
   const inputContext = el => clean(el.closest(
     '[role="dialog"],.modal,.drawer,[class*="dialog"],[class*="modal"],[class*="drawer"],[class*="chat"],[class*="message"],[class*="im"]'
@@ -330,13 +634,22 @@ def _private_message_script(nickname: str, user_id: str, content: str,
     .filter(item => item.score > 0)
     .sort((a,b) => b.score - a.score);
   let candidates = [];
-  for (let attempt = 1; attempt <= 30; attempt++) {{
+  for (let attempt = 1; attempt <= 40; attempt++) {{
     candidates = inputCandidates();
+    const currentUrl = location.href;
+    if (attempt === 1 || attempt % 5 === 0 || currentUrl !== afterClickUrl) {{
+      record('private_message_input_state_probe', {{attempt,
+        url:currentUrl, title:document.title, readyState:document.readyState,
+        visibility:document.visibilityState, hidden:document.hidden,
+        candidateCount:candidates.length}});
+    }}
     if (candidates.length) break;
-    await sleep(300);
+    await sleep(250);
   }}
   const input = candidates.length ? candidates[0].el : null;
   record('private_message_input_probe', {{count:candidates.length,
+    page:{{url:location.href, title:document.title, readyState:document.readyState,
+      visibility:document.visibilityState, hidden:document.hidden}},
     candidates:candidates.slice(0, 8).map(item => {{ const r=item.el.getBoundingClientRect();
       return {{score:item.score, tag:item.el.tagName, placeholder:item.placeholder,
         x:r.x, y:r.y, w:r.width, h:r.height}}; }})}});
@@ -383,9 +696,19 @@ def _private_message_script(nickname: str, user_id: str, content: str,
     rect:(() => {{ const r=send.getBoundingClientRect(); return {{x:r.x,y:r.y,w:r.width,h:r.height}}; }})()}});
   send.click();
   record('private_message_send_button_clicked');
-  await sleep(700);
-  const after = clean(input.isConnected ? (input.isContentEditable ? input.innerText || input.textContent : input.value) : '');
-  const sent = !input.isConnected || after.length === 0 || after !== clean(target.content);
+  // 点击后私信面板可能要等待网络回执才清空输入框。只采样一次会把
+  // 已经发出的私信误判成失败，随后用户再次点击就可能重复发送。
+  let after = '';
+  let sent = false;
+  for (let verifyAttempt = 1; verifyAttempt <= 24; verifyAttempt++) {{
+    await sleep(500);
+    after = clean(input.isConnected ? (input.isContentEditable
+      ? input.innerText || input.textContent : input.value) : '');
+    sent = !input.isConnected || after.length === 0 || after !== clean(target.content);
+    record('private_message_send_confirmation_probe', {{attempt:verifyAttempt,
+      inputConnected:input.isConnected, remainingLength:after.length, sent}});
+    if (sent) break;
+  }}
   return {{ok:sent, verified:sent, clicked:true,
     stage:sent ? 'private_message_sent' : 'private_message_send_unconfirmed',
     message:sent ? '已点击私信发送按钮并确认输入框变化' : '已点击私信发送按钮，但页面未确认发送结果', trace}};
