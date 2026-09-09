@@ -4944,6 +4944,10 @@ ApplicationWindow {
     // 这里与已确认的登录设计稿保持同一结构：左侧品牌/能力引导，右侧认证卡片。
     Rectangle {
         id: authOverlay
+        // 认证层不能成为 StackLayout 的页面，否则切换到“任务中心”等
+        // 页面时，StackLayout 会把它当成业务页面强制显示，造成顶部已登录
+        // 但内容区仍显示登录页。显式挂到窗口内容层，保持独立遮罩。
+        parent: window.contentItem
         anchors.fill: parent
         z: 1000
         visible: !backend.authenticated
