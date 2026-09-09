@@ -747,6 +747,7 @@ ApplicationWindow {
             Page {
                 id: overviewPage
                 background: Rectangle { color: window.color }
+                visible: backend.currentPage === "overview"
                 property var platformSlots: [
                     {key: "douyin", label: "抖音", enabled: true, color: "#2f8cff"},
                     {key: "xhs", label: "小红书", enabled: true, color: "#ff496d"},
@@ -1081,6 +1082,7 @@ ApplicationWindow {
             Page {
                 id: tasksPage
                 background: Rectangle { color: window.color }
+                visible: backend.currentPage === "tasks"
                 property int taskIdWidth: 62
                 property int taskKeywordWidth: 180
                 property int taskPlatformWidth: 116
@@ -1496,6 +1498,7 @@ ApplicationWindow {
             Page {
                 id: accountsPage
                 background: Rectangle { color: window.color }
+                visible: backend.currentPage === "accounts"
                 property int accountNameWidth: 205
                 property int accountPlatformWidth: 116
                 property int accountStatusWidth: 120
@@ -1767,6 +1770,7 @@ ApplicationWindow {
             Page {
                 id: leadPage
                 background: Rectangle { color: window.color }
+                visible: backend.currentPage === "leads"
                 property var selectedLeadIds: []
                 property bool exportAllFiltered: false
                 property var selectedLead: null
@@ -2256,6 +2260,7 @@ ApplicationWindow {
             Page {
                 id: interactionPage2
                 background: Rectangle { color: window.color }
+                visible: backend.currentPage === "interaction"
                 property string activeType: "comment_reply"
                 property string activeStatus: "draft"
                 property var selectedDraftIds: []
@@ -2856,6 +2861,7 @@ ApplicationWindow {
             Page {
                 id: publishPage
                 background: Rectangle { color: window.color }
+                visible: backend.currentPage === "publish"
                 property string activeStatus: "all"
                 property string activePlatform: ""
                 property string searchText: ""
@@ -4322,6 +4328,7 @@ ApplicationWindow {
             Page {
                 id: analyticsPage
                 background: Rectangle { color: window.color }
+                visible: backend.currentPage === "analytics"
                 property var summary: JSON.parse(backend.snapshotJson || "{}")
                 ColumnLayout {
                     anchors.fill: parent
@@ -4442,6 +4449,7 @@ ApplicationWindow {
             Page {
                 id: diagnosticsPage
                 background: Rectangle { color: window.color }
+                visible: backend.currentPage === "diagnostics"
                 Component.onCompleted: backend.refreshDiagnostics()
                 Flickable {
                     id: diagnosticsScroll
