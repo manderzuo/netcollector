@@ -1852,7 +1852,10 @@ ApplicationWindow {
                     var value = backend.leadStats[key]
                     return value === undefined || value === null ? fallback : value
                 }
-                Component.onCompleted: requestLeadRefresh()
+                Component.onCompleted: {
+                    if (backend.authenticated)
+                        requestLeadRefresh()
+                }
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -2421,7 +2424,10 @@ ApplicationWindow {
                         return Number(item) !== id
                     })
                 }
-                Component.onCompleted: requestInteractionRefresh()
+                Component.onCompleted: {
+                    if (backend.authenticated)
+                        requestInteractionRefresh()
+                }
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -3383,6 +3389,8 @@ ApplicationWindow {
                     return ""
                 }
                 Component.onCompleted: {
+                    if (!backend.authenticated)
+                        return
                     ensureSchedulePickerSelection()
                     requestRefresh()
                 }
@@ -4450,7 +4458,10 @@ ApplicationWindow {
                 id: diagnosticsPage
                 background: Rectangle { color: window.color }
                 visible: backend.currentPage === "diagnostics"
-                Component.onCompleted: backend.refreshDiagnostics()
+                Component.onCompleted: {
+                    if (backend.authenticated)
+                        backend.refreshDiagnostics()
+                }
                 Flickable {
                     id: diagnosticsScroll
                     anchors.fill: parent
@@ -4807,6 +4818,8 @@ ApplicationWindow {
                 window.workspaceMode = "collect"
                 window.lastCollectionPage = page
             }
+            if (!backend.authenticated)
+                return
             if (page !== window.lastAutoInspectedPage) {
                 window.lastAutoInspectedPage = page
                 if (page === "accounts") {
@@ -4816,6 +4829,17 @@ ApplicationWindow {
                         backend.refreshAccountNicknames()
                     }
                 }
+            }
+            if (page === "tasks" || page === "overview") {
+                backend.refresh()
+            } else if (page === "leads") {
+                leadPage.requestLeadRefresh()
+            } else if (page === "interaction") {
+                interactionPage2.requestInteractionRefresh()
+            } else if (page === "publish") {
+                publishPage.requestRefresh()
+            } else if (page === "diagnostics") {
+                backend.refreshDiagnostics()
             }
         }
         function onCommandFinished(command, ok, message) {

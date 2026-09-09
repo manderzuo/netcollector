@@ -268,6 +268,8 @@ class QmlBridge(QObject):
             self._bridge.refresh_interactions_async()
             self.refreshKeywordGroups()
             self.refreshSyncStatus()
+            self.refreshDiagnostics()
+            self.refreshPublishDrafts()
             if str(user.get("role") or "") == "admin":
                 self.refreshAdminDashboard()
             return
