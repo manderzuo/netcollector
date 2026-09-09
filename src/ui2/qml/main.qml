@@ -93,6 +93,16 @@ ApplicationWindow {
         if (!denominator || denominator <= 0) return "0%"
         return Math.round((numerator * 1000) / denominator) / 10 + "%"
     }
+    function friendlyError(raw) {
+        var value = String(raw || "").trim()
+        var lower = value.toLowerCase()
+        if (!value) return ""
+        if (lower.indexOf("10061") >= 0 || lower.indexOf("bitbrowser") >= 0 || lower.indexOf("browser/open") >= 0)
+            return "无法连接 BitBrowser · 请检查浏览器服务"
+        if (lower.indexOf("api") >= 0 || lower.indexOf("timeout") >= 0 || lower.indexOf("timed out") >= 0)
+            return "服务请求失败 · 请检查设置与诊断"
+        return value
+    }
     function taskTimeLabel(value) {
         var text = String(value || "").replace("T", " ")
         if (!text) return "—"
@@ -443,7 +453,7 @@ ApplicationWindow {
                         spacing: 10
                         Rectangle {
                             Layout.preferredWidth: 34
-                            Layout.preferredHeight: 34
+                            Layout.preferredHeight: window.controlHeight
                             radius: 10
                             color: "transparent"
                             clip: true
@@ -657,7 +667,7 @@ ApplicationWindow {
                     anchors.rightMargin: window.pagePadding
                     spacing: 16
                     Text { text: backend.pageLabel; color: window.ink; font.pixelSize: 22; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
-                    Text { visible: backend.lastError !== ""; text: backend.lastError; color: window.danger; Layout.preferredWidth: 250; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
+                    Text { visible: backend.lastError !== ""; text: window.friendlyError(backend.lastError); color: window.danger; Layout.preferredWidth: 300; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                     Item { Layout.fillWidth: true }
                     AppButton {
                         id: personalCenterButton
@@ -679,7 +689,7 @@ ApplicationWindow {
                                     anchors.centerIn: parent
                                     text: String(personalCenterButton.text || "人").slice(0, 1)
                                     color: "#ffffff"
-                                    font.pixelSize: 11
+                                    font.pixelSize: 12
                                     font.weight: Font.DemiBold
                                 }
                             }
@@ -689,7 +699,7 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 elide: Text.ElideRight
                                 verticalAlignment: Text.AlignVCenter
-                                font.pixelSize: 11
+                                font.pixelSize: 12
                             }
                         }
                         background: Rectangle {
@@ -719,12 +729,12 @@ ApplicationWindow {
                         color: "#ffe0b2"
                         Layout.fillWidth: true
                         elide: Text.ElideRight
-                        font.pixelSize: 11
+                        font.pixelSize: 12
                     }
                     AppButton {
                         text: "查看账号"
                         onClicked: window.showPage("accounts")
-                        contentItem: Text { text: parent.text; color: window.amber; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                        contentItem: Text { text: parent.text; color: window.amber; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                         background: Rectangle { radius: 6; color: "#4a3324"; border.color: parent.hovered ? window.amber : "#8e633d" }
                     }
                 }
@@ -874,27 +884,26 @@ ApplicationWindow {
                                             delegate: Rectangle { width: 4; height: 8 + ((index + Number(overviewPage.summary.comments || 0)) % 6) * 3; radius: 2; color: accent; opacity: 0.45 }
                                         }
                                     }
-                                }
-                            }
-                        }
-                        RowLayout {
+                                 }
+                             }
+                             RowLayout {
                             Layout.fillWidth: true; spacing: 12
                             Rectangle {
                                 Layout.fillWidth: true; Layout.preferredHeight: 386; radius: 10; color: "#0e1b2d"; border.color: "#203957"
                                 ColumnLayout { anchors.fill: parent; anchors.margins: 16; spacing: 9
                                     RowLayout { Layout.fillWidth: true
                                         Text { text: "任务队列"; color: window.ink; font.pixelSize: 17; font.weight: Font.Medium }
-                                        Text { text: "实时状态"; color: window.muted; font.pixelSize: 10; Layout.leftMargin: 7 }
+                                        Text { text: "实时状态"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 7 }
                                         Item { Layout.fillWidth: true }
-                                        Text { text: (overviewPage.summary.tasks || 0) + " 个任务"; color: window.muted; font.pixelSize: 10 }
+                                        Text { text: (overviewPage.summary.tasks || 0) + " 个任务"; color: window.muted; font.pixelSize: 12 }
                                     }
                                     Item { Layout.fillWidth: true; Layout.preferredHeight: 20
-                                        Text { x: overviewPage.queueLeftInset; width: overviewPage.queueKeywordWidth; text: "关键词"; color: window.muted; horizontalAlignment: Text.AlignLeft; font.pixelSize: 10 }
-                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + (overviewPage.queuePlatformWidth - implicitWidth) / 2; width: implicitWidth; text: "平台"; color: window.muted; font.pixelSize: 10 }
-                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + overviewPage.queuePlatformWidth + (overviewPage.queueAccountWidth - implicitWidth) / 2; width: implicitWidth; text: "账号"; color: window.muted; font.pixelSize: 10 }
-                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + overviewPage.queuePlatformWidth + overviewPage.queueAccountWidth + (overviewPage.queueProgressWidth - implicitWidth) / 2; width: implicitWidth; text: "进度"; color: window.muted; font.pixelSize: 10 }
-                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + overviewPage.queuePlatformWidth + overviewPage.queueAccountWidth + overviewPage.queueProgressWidth + (overviewPage.queueCommentsWidth - implicitWidth) / 2; width: implicitWidth; text: "评论数"; color: window.muted; font.pixelSize: 10 }
-                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + overviewPage.queuePlatformWidth + overviewPage.queueAccountWidth + overviewPage.queueProgressWidth + overviewPage.queueCommentsWidth + (Math.max(0, parent.width - overviewPage.queueLeftInset - overviewPage.queueKeywordWidth - overviewPage.queuePlatformWidth - overviewPage.queueAccountWidth - overviewPage.queueProgressWidth - overviewPage.queueCommentsWidth - overviewPage.queueRightInset) - implicitWidth) / 2; width: implicitWidth; text: "状态"; color: window.muted; font.pixelSize: 10 }
+                                        Text { x: overviewPage.queueLeftInset; width: overviewPage.queueKeywordWidth; text: "关键词"; color: window.muted; horizontalAlignment: Text.AlignLeft; font.pixelSize: 12 }
+                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + (overviewPage.queuePlatformWidth - implicitWidth) / 2; width: implicitWidth; text: "平台"; color: window.muted; font.pixelSize: 12 }
+                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + overviewPage.queuePlatformWidth + (overviewPage.queueAccountWidth - implicitWidth) / 2; width: implicitWidth; text: "账号"; color: window.muted; font.pixelSize: 12 }
+                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + overviewPage.queuePlatformWidth + overviewPage.queueAccountWidth + (overviewPage.queueProgressWidth - implicitWidth) / 2; width: implicitWidth; text: "进度"; color: window.muted; font.pixelSize: 12 }
+                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + overviewPage.queuePlatformWidth + overviewPage.queueAccountWidth + overviewPage.queueProgressWidth + (overviewPage.queueCommentsWidth - implicitWidth) / 2; width: implicitWidth; text: "评论数"; color: window.muted; font.pixelSize: 12 }
+                                        Text { x: overviewPage.queueLeftInset + overviewPage.queueKeywordWidth + overviewPage.queuePlatformWidth + overviewPage.queueAccountWidth + overviewPage.queueProgressWidth + overviewPage.queueCommentsWidth + (Math.max(0, parent.width - overviewPage.queueLeftInset - overviewPage.queueKeywordWidth - overviewPage.queuePlatformWidth - overviewPage.queueAccountWidth - overviewPage.queueProgressWidth - overviewPage.queueCommentsWidth - overviewPage.queueRightInset) - implicitWidth) / 2; width: implicitWidth; text: "状态"; color: window.muted; font.pixelSize: 12 }
                                     }
                                     Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
                                     ListView {
@@ -919,7 +928,7 @@ ApplicationWindow {
                                                     x: overviewPage.queueLeftInset; width: overviewPage.queueKeywordWidth; height: 20
                                                     anchors.verticalCenter: parent.verticalCenter
                                                     text: taskRow.keyword || "未命名任务"; color: window.ink; elide: Text.ElideRight
-                                                    verticalAlignment: Text.AlignVCenter; font.pixelSize: 10
+                                                    verticalAlignment: Text.AlignVCenter; font.pixelSize: 12
                                                 }
                                                 Loader {
                                                     x: tablePlatformX; y: (parent.height - 19) / 2; width: 19; height: 19
@@ -929,7 +938,7 @@ ApplicationWindow {
                                                 Text {
                                                     x: tablePlatformX + 27; y: (parent.height - 20) / 2; width: overviewPage.queuePlatformWidth - 27; height: 20
                                                     text: taskRow.platform_label || "未知"; color: window.blue; elide: Text.ElideRight
-                                                    verticalAlignment: Text.AlignVCenter; font.pixelSize: 9
+                                                    verticalAlignment: Text.AlignVCenter; font.pixelSize: 12
                                                 }
                                                 Column {
                                                     x: tableAccountX; y: Math.max(0, (parent.height - accountLineCount * 18) / 2)
@@ -939,7 +948,7 @@ ApplicationWindow {
                                                         delegate: Text {
                                                             width: overviewPage.queueAccountWidth; height: 18; text: modelData
                                                             color: window.muted; elide: Text.ElideRight
-                                                            verticalAlignment: Text.AlignVCenter; font.pixelSize: 9
+                                                            verticalAlignment: Text.AlignVCenter; font.pixelSize: 12
                                                         }
                                                     }
                                                 }
@@ -959,19 +968,19 @@ ApplicationWindow {
                                                     Text {
                                                         anchors.fill: parent; text: Number(taskRow.progress || 0) + "%"
                                                         color: window.ink; horizontalAlignment: Text.AlignHCenter
-                                                        verticalAlignment: Text.AlignVCenter; font.pixelSize: 9; font.weight: Font.DemiBold
+                                                        verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.weight: Font.DemiBold
                                                     }
                                                 }
                                                 Text {
                                                     x: tableCommentsX; y: (parent.height - 20) / 2; width: overviewPage.queueCommentsWidth; height: 20
                                                     text: Number(taskRow.comments || 0); color: window.ink
-                                                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 9
+                                                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12
                                                 }
                                                 Text {
                                                     x: tableStatusX; y: (parent.height - 20) / 2
                                                     width: Math.max(0, parent.width - tableStatusX - overviewPage.queueRightInset); height: 20
                                                     text: window.taskStatusLabel(taskRow); color: window.muted; elide: Text.ElideRight
-                                                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 9
+                                                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12
                                                 }
                                             }
                                         }
@@ -996,7 +1005,7 @@ ApplicationWindow {
                                             background: Rectangle { color: overviewPage.showAlerts ? "#16345b" : "transparent"; border.color: overviewPage.showAlerts ? window.amber : "transparent"; radius: 5 }
                                         }
                                         Item { Layout.fillWidth: true }
-                                        Text { text: "局部更新"; color: window.green; font.pixelSize: 9 }
+                                        Text { text: "局部更新"; color: window.green; font.pixelSize: 12 }
                                     }
                                     ListView { Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 7; model: overviewPage.showAlerts ? overviewPage.alertLogs() : overviewPage.recentLogs()
                                         delegate: Rectangle { width: parent ? parent.width : 0; height: 48; radius: 7; color: modelData.level === "error" ? "#301d2a" : (modelData.level === "warning" ? "#302719" : "#101f33"); border.color: modelData.level === "error" ? "#824359" : (modelData.level === "warning" ? "#806128" : "#24405e")
@@ -1007,7 +1016,7 @@ ApplicationWindow {
                                                     Text { anchors.centerIn: parent; text: modelData.level === "error" ? "×" : (modelData.level === "warning" ? "!" : "✓"); color: "#071224"; font.pixelSize: 13; font.weight: Font.DemiBold }
                                                 }
                                                 ColumnLayout { Layout.fillWidth: true; spacing: 1
-                                                    Text { text: String(modelData.message || ""); color: modelData.level === "error" ? "#ff9aaa" : window.ink; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 10 }
+                                                    Text { text: String(modelData.message || ""); color: modelData.level === "error" ? "#ff9aaa" : window.ink; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12 }
                                                     Text { text: String(modelData.timestamp || "").replace("T", " ").slice(-8); color: window.muted; font.pixelSize: 8 }
                                                 }
                                             }
@@ -1021,12 +1030,12 @@ ApplicationWindow {
                             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 248; radius: 10; color: "#0e1b2d"; border.color: "#203957"
                                 ColumnLayout { anchors.fill: parent; anchors.margins: 16; spacing: 8
                                     Text { text: "采集趋势"; color: window.ink; font.pixelSize: 17; font.weight: Font.Medium }
-                                    Text { text: "按当前任务的评论采集量汇总"; color: window.muted; font.pixelSize: 10 }
+                                    Text { text: "按当前任务的评论采集量汇总"; color: window.muted; font.pixelSize: 12 }
                                     Canvas { id: overviewTrendCanvas; Layout.fillWidth: true; Layout.fillHeight: true; antialiasing: true
                                         onPaint: { var ctx = getContext("2d"); ctx.clearRect(0, 0, width, height); var vals = overviewPage.trendValues(); var max = 1; for (var i = 0; i < vals.length; i++) max = Math.max(max, vals[i]); ctx.strokeStyle = "#1d3550"; ctx.lineWidth = 1; for (var g = 1; g < 4; g++) { var gy = height * g / 4; ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(width, gy); ctx.stroke() }; ctx.beginPath(); for (var p = 0; p < vals.length; p++) { var x = p * width / Math.max(1, vals.length - 1); var y = height - (vals[p] / max) * (height - 18) - 5; if (p === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y) }; ctx.strokeStyle = "#2f9cff"; ctx.lineWidth = 2.2; ctx.stroke(); ctx.lineTo(width, height); ctx.lineTo(0, height); ctx.closePath(); ctx.fillStyle = "rgba(47, 156, 255, 0.13)"; ctx.fill(); ctx.beginPath(); for (var q = 0; q < vals.length; q++) { var qx = q * width / Math.max(1, vals.length - 1); var qy = height - (vals[q] / max) * (height - 18) - 5; ctx.moveTo(qx + 2, qy); ctx.arc(qx, qy, 2.5, 0, Math.PI * 2) }; ctx.fillStyle = "#40c1ff"; ctx.fill() }
-                                    }
-                                    RowLayout {
-                                        Layout.fillWidth: true
+                             }
+                             RowLayout {
+                                 Layout.fillWidth: true
                                         Text { text: "00:00"; color: window.muted; font.pixelSize: 8 }
                                         Item { Layout.fillWidth: true }
                                         Text { text: "12:00"; color: window.muted; font.pixelSize: 8 }
@@ -1041,7 +1050,7 @@ ApplicationWindow {
                                         Layout.fillWidth: true
                                         Text { text: "平台分布"; color: window.ink; font.pixelSize: 17; font.weight: Font.Medium }
                                         Item { Layout.fillWidth: true }
-                                        Text { text: "评论数"; color: window.muted; font.pixelSize: 9 }
+                                        Text { text: "评论数"; color: window.muted; font.pixelSize: 12 }
                                     }
                                     RowLayout { Layout.fillWidth: true; Layout.fillHeight: true; spacing: 13
                                         Canvas { id: overviewDonutCanvas; Layout.preferredWidth: 142; Layout.preferredHeight: 142; antialiasing: true
@@ -1051,9 +1060,9 @@ ApplicationWindow {
                                             Repeater { model: overviewPage.platformSlots
                                                 delegate: RowLayout {
                                                     Layout.fillWidth: true; spacing: 5
-                                                    Text { text: modelData.enabled ? "●" : "○"; color: modelData.color; font.pixelSize: 11 }
-                                                    Text { text: modelData.label + (modelData.enabled ? "" : "（预留）"); color: modelData.enabled ? window.ink : window.muted; Layout.fillWidth: true; font.pixelSize: 9 }
-                                                    Text { text: modelData.enabled ? overviewPage.platformStats(modelData).comments : "—"; color: window.muted; font.pixelSize: 9 }
+                                                    Text { text: modelData.enabled ? "●" : "○"; color: modelData.color; font.pixelSize: 12 }
+                                                    Text { text: modelData.label + (modelData.enabled ? "" : "（预留）"); color: modelData.enabled ? window.ink : window.muted; Layout.fillWidth: true; font.pixelSize: 12 }
+                                                    Text { text: modelData.enabled ? overviewPage.platformStats(modelData).comments : "—"; color: window.muted; font.pixelSize: 12 }
                                                 }
                                             }
                                         }
@@ -1594,21 +1603,22 @@ ApplicationWindow {
                 }
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 30
-                    spacing: 17
+                    anchors.margins: window.pagePadding
+                    spacing: 20
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "账号管理"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
+                        Text { text: "账号管理"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                         Item { Layout.fillWidth: true }
                         ComboBox {
                             id: accountPlatformFilter
                             Layout.preferredWidth: 140
+                            Layout.preferredHeight: window.controlHeight
                             model: accountsPage.platformOptions
                             textRole: "label"
                             valueRole: "value"
                             delegate: darkComboDelegate
-                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 10 }
-                            background: Rectangle { radius: 8; color: window.panel; border.color: window.line }
+                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: window.panel; border.color: parent.hovered ? window.blue : window.line }
                         }
                         AppButton {
                             text: "刷新账号"
@@ -1618,14 +1628,14 @@ ApplicationWindow {
                                 accountsPage.nicknameRefreshRequested = true
                                 backend.refreshAccountNicknames()
                             }
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { radius: 9; color: window.panel2; border.color: window.line }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                         }
                         AppButton {
                             text: "＋ 创建浏览器"
                             onClicked: createBrowserDialog.open()
-                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { radius: 9; color: window.blue; border.color: window.line }
+                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                            background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#8bbaff" : window.blue; border.color: window.line }
                         }
                         AppButton {
                             text: "＋ 添加账号"
@@ -1634,16 +1644,16 @@ ApplicationWindow {
                                 if (selected && selected.is_window_only) accountDialog.openForWindow(selected)
                                 else accountDialog.open()
                             }
-                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { radius: 9; color: window.blue; border.color: window.line }
+                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                            background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#8bbaff" : window.blue; border.color: window.line }
                         }
                     }
-                    Text { text: "账号、平台和比特浏览器窗口绑定状态统一查看"; color: window.muted; font.pixelSize: 12 }
+                    Text { text: "账号、平台和比特浏览器窗口绑定状态统一查看"; color: window.muted; font.pixelSize: 13; font.family: window.uiFontFamily }
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: 13
-                        color: window.panel
+                        color: window.surface
                         border.color: window.line
                         ColumnLayout {
                             anchors.fill: parent
@@ -1651,25 +1661,26 @@ ApplicationWindow {
                             spacing: 0
                             RowLayout {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 38
+                                Layout.preferredHeight: 42
                                 spacing: 12
-                                Text { text: "账号"; color: window.muted; Layout.preferredWidth: accountsPage.accountNameWidth; Layout.minimumWidth: accountsPage.accountNameWidth; Layout.maximumWidth: accountsPage.accountNameWidth; leftPadding: 12 }
-                                Text { text: "平台"; color: window.muted; Layout.preferredWidth: accountsPage.accountPlatformWidth; Layout.minimumWidth: accountsPage.accountPlatformWidth; Layout.maximumWidth: accountsPage.accountPlatformWidth }
-                                Text { text: "状态"; color: window.muted; Layout.preferredWidth: accountsPage.accountStatusWidth; Layout.minimumWidth: accountsPage.accountStatusWidth; Layout.maximumWidth: accountsPage.accountStatusWidth }
-                                Text { text: "浏览器窗口"; color: window.muted; Layout.fillWidth: true }
-                                Text { text: "处理统计"; color: window.muted; Layout.preferredWidth: accountsPage.accountStatsWidth; Layout.minimumWidth: accountsPage.accountStatsWidth; Layout.maximumWidth: accountsPage.accountStatsWidth }
+                                Text { text: "账号"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: accountsPage.accountNameWidth; Layout.minimumWidth: accountsPage.accountNameWidth; Layout.maximumWidth: accountsPage.accountNameWidth; leftPadding: 12 }
+                                Text { text: "平台"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: accountsPage.accountPlatformWidth; Layout.minimumWidth: accountsPage.accountPlatformWidth; Layout.maximumWidth: accountsPage.accountPlatformWidth }
+                                Text { text: "状态"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: accountsPage.accountStatusWidth; Layout.minimumWidth: accountsPage.accountStatusWidth; Layout.maximumWidth: accountsPage.accountStatusWidth }
+                                Text { text: "浏览器窗口"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true }
+                                Text { text: "处理统计"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: accountsPage.accountStatsWidth; Layout.minimumWidth: accountsPage.accountStatsWidth; Layout.maximumWidth: accountsPage.accountStatsWidth }
                             }
                             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
-                            ListView {
-                                Layout.fillWidth: true
+                             ListView {
+                                 id: accountsListView
+                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
                                 model: accountsPage.filteredAccounts()
                                 spacing: 1
                                 delegate: Rectangle {
                                     width: ListView.view.width
-                                    height: 64
-                                    color: ((modelData.is_window_only && accountsPage.selectedWindowId === String(modelData.window_id || "")) || (!modelData.is_window_only && accountsPage.selectedAccountId === modelData.id)) ? "#20395c" : (index % 2 === 0 ? "transparent" : "#17273d")
+                                     height: 72
+                                     color: ((modelData.is_window_only && accountsPage.selectedWindowId === String(modelData.window_id || "")) || (!modelData.is_window_only && accountsPage.selectedAccountId === modelData.id)) ? "#20395c" : (index % 2 === 0 ? "transparent" : window.surfaceRaised)
                                     MouseArea { anchors.fill: parent; z: 0; onClicked: { if (modelData.is_window_only) { accountsPage.selectedAccountId = 0; accountsPage.selectedWindowId = String(modelData.window_id || "") } else { accountsPage.selectedAccountId = Number(modelData.id || 0); accountsPage.selectedWindowId = String(modelData.window_id || "") } } }
                                     RowLayout {
                                         anchors.fill: parent
@@ -1682,8 +1693,8 @@ ApplicationWindow {
                                             Layout.minimumWidth: accountsPage.accountNameWidth
                                             Layout.maximumWidth: accountsPage.accountNameWidth
                                             spacing: 2
-                                            Text { text: modelData.name; color: window.ink; elide: Text.ElideRight; Layout.fillWidth: true }
-                                            Text { text: modelData.is_window_only ? "待绑定浏览器窗口" : "账号 ID：" + modelData.id; color: window.muted; font.pixelSize: 11 }
+                                             Text { text: modelData.name; color: window.ink; elide: Text.ElideRight; Layout.fillWidth: true; font.pixelSize: 13; font.family: window.uiFontFamily }
+                                             Text { text: modelData.is_window_only ? "待绑定浏览器窗口" : "账号 ID：" + modelData.id; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily }
                                         }
                                         RowLayout {
                                             Layout.preferredWidth: accountsPage.accountPlatformWidth
@@ -1691,30 +1702,38 @@ ApplicationWindow {
                                             Layout.maximumWidth: accountsPage.accountPlatformWidth
                                             spacing: 7
                                             Loader { Layout.preferredWidth: 24; Layout.preferredHeight: 24; sourceComponent: userPlatformIconComponent; onLoaded: item.platform = modelData.platform }
-                                            Text { text: modelData.platform_label; color: window.blue; Layout.fillWidth: true; elide: Text.ElideRight }
+                                             Text { text: modelData.platform_label; color: window.blue; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                         }
-                                        Text { text: modelData.status_label; color: modelData.status === "waiting_human" ? window.amber : (modelData.is_window_only && modelData.status === "idle" ? window.green : window.muted); Layout.preferredWidth: accountsPage.accountStatusWidth; Layout.minimumWidth: accountsPage.accountStatusWidth; Layout.maximumWidth: accountsPage.accountStatusWidth; elide: Text.ElideRight }
+                                         Text { text: modelData.status_label; color: modelData.status === "waiting_human" ? window.amber : (modelData.is_window_only && modelData.status === "idle" ? window.green : window.muted); Layout.preferredWidth: accountsPage.accountStatusWidth; Layout.minimumWidth: accountsPage.accountStatusWidth; Layout.maximumWidth: accountsPage.accountStatusWidth; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                         ColumnLayout {
                                             Layout.fillWidth: true
                                             spacing: 2
-                                            Text { text: modelData.binding_label; color: modelData.is_window_only ? window.amber : (modelData.window_id ? window.green : window.amber) }
-                                            Text { text: modelData.window_id || "未设置窗口 ID"; color: window.muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
+                                             Text { text: modelData.binding_label; color: modelData.is_window_only ? window.amber : (modelData.window_id ? window.green : window.amber); font.pixelSize: 12; font.family: window.uiFontFamily }
+                                             Text { text: modelData.window_id || "未设置窗口 ID"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; elide: Text.ElideRight; Layout.fillWidth: true }
                                         }
-                                        Text { text: modelData.processed_count + " 条 / " + modelData.batch_count + " 批"; color: window.muted; Layout.preferredWidth: accountsPage.accountStatsWidth; Layout.minimumWidth: accountsPage.accountStatsWidth; Layout.maximumWidth: accountsPage.accountStatsWidth; elide: Text.ElideRight }
+                                         Text { text: modelData.processed_count + " 条 / " + modelData.batch_count + " 批"; color: window.muted; Layout.preferredWidth: accountsPage.accountStatsWidth; Layout.minimumWidth: accountsPage.accountStatsWidth; Layout.maximumWidth: accountsPage.accountStatsWidth; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                     }
-                                }
-                            }
-                            RowLayout {
+                                 }
+                             }
+                             ColumnLayout {
+                                 visible: accountsPage.filteredAccounts().length === 0
+                                 Layout.fillWidth: true
+                                 Layout.preferredHeight: 92
+                                 spacing: 6
+                                 Text { text: "暂无账号或浏览器窗口"; color: window.ink; font.pixelSize: 15; font.family: window.uiFontFamily; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignHCenter }
+                                 Text { text: "创建浏览器窗口或绑定账号后，状态会显示在这里。"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.alignment: Qt.AlignHCenter }
+                             }
+                             RowLayout {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 48
                                 spacing: 9
-                                Text { text: accountsPage.selectedAccountData() ? (accountsPage.selectedAccountData().is_window_only ? "已选浏览器窗口" : "已选账号 #" + accountsPage.selectedAccountId) : "请选择账号查看可用操作"; color: window.muted; Layout.fillWidth: true; font.pixelSize: 11; elide: Text.ElideRight }
+                                Text { text: accountsPage.selectedAccountData() ? (accountsPage.selectedAccountData().is_window_only ? "已选浏览器窗口" : "已选账号 #" + accountsPage.selectedAccountId) : "请选择账号查看可用操作"; color: window.muted; Layout.fillWidth: true; font.pixelSize: 12; font.family: window.uiFontFamily; elide: Text.ElideRight }
                                 AppButton {
                                     text: "打开浏览器"
                                     enabled: accountsPage.selectedHasWindow()
                                     onClicked: backend.openAccountBrowser(accountsPage.selectedAccountId)
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                    background: Rectangle { radius: 7; color: window.panel2; border.color: parent.enabled ? window.line : window.line }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                    background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.enabled ? window.line : window.line }
                                 }
                                 AppButton {
                                     text: accountsPage.selectedAccountData() && accountsPage.selectedAccountData().is_window_only
@@ -1722,22 +1741,22 @@ ApplicationWindow {
                                           : (accountsPage.selectedAccountData() && accountsPage.selectedAccountData().nickname_resolved ? "刷新昵称" : "读取昵称")
                                     enabled: accountsPage.selectedHasWindow()
                                     onClicked: { var selected = accountsPage.selectedAccountData(); if (selected && selected.is_window_only) accountDialog.openForWindow(selected); else backend.bindAccount(accountsPage.selectedAccountId) }
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.green : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                    background: Rectangle { radius: 7; color: window.panel2; border.color: parent.enabled ? window.line : window.line }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.green : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                    background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.enabled ? window.line : window.line }
                                 }
                                 AppButton {
                                     text: "解除绑定"
                                     enabled: accountsPage.selectedAccountId > 0
                                     onClicked: { backend.removeAccount(accountsPage.selectedAccountId); accountsPage.selectedAccountId = 0 }
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? "#ff9b9b" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                    background: Rectangle { radius: 7; color: window.panel2; border.color: parent.enabled ? "#74434d" : window.line }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.danger : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                    background: Rectangle { radius: window.smallRadius; color: parent.hovered && parent.enabled ? "#3a2633" : window.panel2; border.color: parent.enabled ? "#74434d" : window.line }
                                 }
                                 AppButton {
                                     text: "删除窗口"
                                     enabled: { var selected = accountsPage.selectedAccountData(); return Boolean(selected && selected.is_window_only && String(selected.window_id || "").trim()) }
                                     onClicked: accountsPage.requestDeleteWindow(accountsPage.selectedAccountData())
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? "#ff9b9b" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                    background: Rectangle { radius: 7; color: window.panel2; border.color: parent.enabled ? "#74434d" : window.line }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.danger : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                    background: Rectangle { radius: window.smallRadius; color: parent.hovered && parent.enabled ? "#3a2633" : window.panel2; border.color: parent.enabled ? "#74434d" : window.line }
                                 }
                             }
                         }
@@ -1833,12 +1852,12 @@ ApplicationWindow {
 
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 26
-                    spacing: 13
+                    anchors.margins: window.pagePadding
+                    spacing: 16
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "线索中心"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
-                        Text { text: "共 " + backend.leadTotal + " 条"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 8 }
+                        Text { text: "线索中心"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                        Text { text: "共 " + backend.leadTotal + " 条"; color: window.muted; font.pixelSize: 13; font.family: window.uiFontFamily; Layout.leftMargin: 8 }
                         Item { Layout.fillWidth: true }
                         AppButton {
                             text: leadPage.exportAllFiltered ? "取消全选" : "全选"
@@ -1899,7 +1918,7 @@ ApplicationWindow {
                             background: Rectangle { radius: 8; color: parent.hovered && parent.enabled ? "#263e63" : window.panel2; border.color: parent.hovered && parent.enabled ? window.blue : window.line }
                         }
                     }
-                    Text { text: "统一查看采集结果、识别意向并安排后续互动"; color: window.muted; font.pixelSize: 12 }
+                    Text { text: "统一查看采集结果、识别意向并安排后续互动"; color: window.muted; font.pixelSize: 13; font.family: window.uiFontFamily }
                     GridLayout {
                         Layout.fillWidth: true
                         columns: 5
@@ -1914,15 +1933,15 @@ ApplicationWindow {
                             ]
                             delegate: Rectangle {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 88
-                                radius: 10
-                                color: window.panel
+                                 Layout.preferredHeight: 104
+                                 radius: window.mediumRadius
+                                 color: window.surface
                                 border.color: window.line
                                 Rectangle { anchors.right: parent.right; anchors.top: parent.top; width: 45; height: 45; radius: 23; color: modelData.color; opacity: 0.08 }
                                 Column {
                                     anchors.left: parent.left; anchors.top: parent.top; anchors.leftMargin: 14; anchors.topMargin: 12; spacing: 6
-                                    Text { text: modelData.label; color: window.muted; font.pixelSize: 11 }
-                                    Text { text: leadPage.leadStat(modelData.key, 0) + modelData.suffix; color: modelData.color; font.pixelSize: 21; font.weight: Font.DemiBold }
+                                     Text { text: modelData.label; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                     Text { text: leadPage.leadStat(modelData.key, 0) + modelData.suffix; color: modelData.color; font.pixelSize: 25; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                                 }
                             }
                         }
@@ -1934,44 +1953,48 @@ ApplicationWindow {
                             id: taskFilter
                             Layout.fillWidth: true
                             Layout.preferredWidth: 330
+                            Layout.preferredHeight: window.controlHeight
                             model: backend.leadTaskOptions
                             textRole: "label"
                             valueRole: "id"
                             delegate: darkComboDelegate
                             onActivated: leadPage.changeLeadTask()
-                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12; elide: Text.ElideRight }
-                            background: Rectangle { radius: 8; color: window.panel; border.color: window.line }
+                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: window.panel; border.color: parent.hovered ? window.blue : window.line }
                         }
                         ComboBox {
                             id: platformFilterLeads
                             Layout.preferredWidth: 135
+                            Layout.preferredHeight: window.controlHeight
                             model: leadPage.platformOptions
                             textRole: "label"
                             valueRole: "value"
                             delegate: darkComboDelegate
                             onActivated: leadPage.requestLeadRefresh()
-                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12 }
-                            background: Rectangle { radius: 8; color: window.panel; border.color: window.line }
+                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: window.panel; border.color: parent.hovered ? window.blue : window.line }
                         }
                         ComboBox {
                             id: provinceFilter
                             Layout.preferredWidth: 135
+                            Layout.preferredHeight: window.controlHeight
                             model: backend.leadProvinceOptions
                             delegate: darkComboDelegate
                             onActivated: leadPage.requestLeadRefresh()
-                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12 }
-                            background: Rectangle { radius: 8; color: window.panel; border.color: window.line }
+                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: window.panel; border.color: parent.hovered ? window.blue : window.line }
                         }
                         ComboBox {
                             id: intentFilter
                             Layout.preferredWidth: 120
+                            Layout.preferredHeight: window.controlHeight
                             model: leadPage.intentOptions
                             textRole: "label"
                             valueRole: "value"
                             delegate: darkComboDelegate
                             onActivated: leadPage.requestLeadRefresh()
-                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12 }
-                            background: Rectangle { radius: 8; color: window.panel; border.color: window.line }
+                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: window.panel; border.color: parent.hovered ? window.blue : window.line }
                         }
                         TextField {
                             id: leadKeywordFilterField
@@ -1982,7 +2005,7 @@ ApplicationWindow {
                             palette.placeholderText: window.muted
                             selectByMouse: true
                             onAccepted: leadPage.requestLeadRefresh()
-                            background: Rectangle { radius: 8; color: window.panel; border.color: parent.activeFocus ? window.blue : window.line }
+                            background: Rectangle { radius: window.smallRadius; color: window.panel; border.color: parent.activeFocus ? window.blue : window.line }
                         }
                         AppButton {
                             text: "筛选"
@@ -2012,7 +2035,7 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             radius: 12
-                            color: window.panel
+                            color: window.surface
                             border.color: window.line
                             ColumnLayout {
                                 anchors.fill: parent
@@ -2020,26 +2043,27 @@ ApplicationWindow {
                                 spacing: 0
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: 38
+                                    Layout.preferredHeight: 42
                                     Layout.leftMargin: 8
                                     Layout.rightMargin: 8
                                     spacing: 9
-                                    Text { text: "选择"; color: window.muted; Layout.preferredWidth: 54; leftPadding: 8 }
-                                    Text { text: "用户"; color: window.muted; Layout.preferredWidth: 160 }
-                                    Text { text: "评论原文"; color: window.muted; Layout.fillWidth: true }
+                                    Text { text: "选择"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: 54; leftPadding: 8 }
+                                    Text { text: "用户"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: 160 }
+                                    Text { text: "评论原文"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true }
                                      AppButton {
                                          Layout.preferredWidth: 145
                                          Layout.minimumWidth: 145
                                          Layout.maximumWidth: 145
                                          text: "评论时间 " + (leadPage.commentTimeDescending ? "↓" : "↑")
                                          onClicked: { leadPage.commentTimeDescending = !leadPage.commentTimeDescending; leadPage.requestLeadRefresh() }
-                                         contentItem: Text { text: parent.text; color: window.blue; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                          contentItem: Text { text: parent.text; color: window.blue; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
                                          background: Rectangle { color: "transparent" }
                                      }
                                     Text { text: "原作地址"; color: window.muted; Layout.preferredWidth: 82 }
                                 }
                                 Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
-                                ListView {
+                                 ListView {
+                                     id: leadListView
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
                                     clip: true
@@ -2048,7 +2072,7 @@ ApplicationWindow {
                                     delegate: Rectangle {
                                         width: ListView.view.width
                                         height: 70
-                                        color: index % 2 === 0 ? "transparent" : "#17273d"
+                                         color: index % 2 === 0 ? "transparent" : window.surfaceRaised
                                         MouseArea { anchors.fill: parent; z: 0; onClicked: leadPage.selectLead(modelData) }
                                         RowLayout {
                                             anchors.fill: parent
@@ -2069,39 +2093,47 @@ ApplicationWindow {
                                                      Loader { Layout.preferredWidth: 20; Layout.preferredHeight: 20; sourceComponent: userPlatformIconComponent; onLoaded: item.platform = modelData.platform }
                                                      Text { text: modelData.nickname; color: window.ink; Layout.fillWidth: true; elide: Text.ElideRight }
                                                  }
-                                                 Text { text: modelData.platform_label + " · " + modelData.region_label; color: window.muted; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                      Text { text: modelData.platform_label + " · " + modelData.region_label; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true; elide: Text.ElideRight }
                                             }
                                             Text { text: modelData.comment; color: window.ink; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; maximumLineCount: 2; wrapMode: Text.WordWrap; elide: Text.ElideRight }
-                                            Text { text: modelData.comment_time; color: window.muted; Layout.preferredWidth: 145; elide: Text.ElideRight; font.pixelSize: 11 }
+                                            Text { text: modelData.comment_time; color: window.muted; Layout.preferredWidth: 145; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                             AppButton {
                                                 Layout.preferredWidth: 82
                                                 text: modelData.source_url_label
                                                 enabled: Boolean(modelData.source_url)
                                                 onClicked: backend.openSourceUrl(modelData.source_url, modelData.comment || modelData.nickname || "")
-                                                contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                                background: Rectangle { radius: 7; color: "transparent"; border.color: parent.enabled ? "#365174" : window.line }
+                                                contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : "transparent"; border.color: parent.enabled ? "#365174" : window.line }
                                             }
                                         }
                                     }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Layout.preferredHeight: 42
-                                    Text { text: "已选 " + leadPage.selectedLeadIds.length + " 条"; color: window.muted; font.pixelSize: 11 }
+                                 }
+                                 ColumnLayout {
+                                     visible: leadListView.count === 0
+                                     Layout.fillWidth: true
+                                     Layout.preferredHeight: 110
+                                     spacing: 6
+                                     Text { text: "暂无线索"; color: window.ink; font.pixelSize: 15; font.family: window.uiFontFamily; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignHCenter }
+                                     Text { text: "调整任务、平台或意向筛选条件后重试。"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.alignment: Qt.AlignHCenter }
+                                 }
+                                 RowLayout {
+                                     Layout.fillWidth: true
+                                     Layout.preferredHeight: 42
+                                     Text { text: "已选 " + leadPage.selectedLeadIds.length + " 条"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily }
                                     Item { Layout.fillWidth: true }
                                     AppButton {
                                         text: "上一页"
                                         enabled: backend.leadPage > 1
                                         onClicked: leadPage.requestLeadPage(backend.leadPage - 1)
-                                        contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                        contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
                                         background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
                                     }
-                                    Text { text: backend.leadPages ? backend.leadPage + " / " + backend.leadPages : "暂无数据"; color: window.muted; font.pixelSize: 11 }
+                                    Text { text: backend.leadPages ? backend.leadPage + " / " + backend.leadPages : "暂无数据"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily }
                                     AppButton {
                                         text: "下一页"
                                         enabled: backend.leadPage < backend.leadPages
                                         onClicked: leadPage.requestLeadPage(backend.leadPage + 1)
-                                        contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                        contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
                                         background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
                                     }
                                 }
@@ -2113,7 +2145,7 @@ ApplicationWindow {
                             Layout.maximumWidth: 410
                             Layout.fillHeight: true
                             radius: 12
-                            color: "#101b2d"
+                            color: window.surface
                             border.color: window.line
                             ColumnLayout {
                                 anchors.fill: parent
@@ -2121,9 +2153,9 @@ ApplicationWindow {
                                 spacing: 11
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Text { text: "线索详情"; color: window.ink; font.pixelSize: 16; font.weight: Font.Medium }
+                                    Text { text: "线索详情"; color: window.ink; font.pixelSize: 18; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                                     Item { Layout.fillWidth: true }
-                                    AppButton { text: "原作 ↗"; visible: leadPage.selectedLead !== null && Boolean(leadPage.selectedLead.source_url); onClicked: backend.openSourceUrl(leadPage.selectedLead.source_url, leadPage.selectedLead.comment || leadPage.selectedLead.nickname || ""); contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 6; color: parent.hovered ? window.panel2 : "transparent" } }
+                                    AppButton { text: "原作 ↗"; visible: leadPage.selectedLead !== null && Boolean(leadPage.selectedLead.source_url); onClicked: backend.openSourceUrl(leadPage.selectedLead.source_url, leadPage.selectedLead.comment || leadPage.selectedLead.nickname || ""); contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 6; color: parent.hovered ? window.panel2 : "transparent" } }
                                 }
                                 Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
                                 ColumnLayout {
@@ -2141,7 +2173,7 @@ ApplicationWindow {
                                             Text { text: leadPage.selectedLead ? leadPage.selectedLead.nickname : ""; color: window.ink; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
                                             RowLayout { Layout.fillWidth: true; spacing: 6
                                                 Loader { property string platformValue: leadPage.selectedLead ? leadPage.selectedLead.platform : ""; Layout.preferredWidth: 20; Layout.preferredHeight: 20; sourceComponent: userPlatformIconComponent; onLoaded: item.platform = platformValue; onPlatformValueChanged: if (item) item.platform = platformValue }
-                                                Text { text: leadPage.selectedLead ? leadPage.selectedLead.platform_label + " · " + leadPage.selectedLead.region_label : ""; color: window.muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                Text { text: leadPage.selectedLead ? leadPage.selectedLead.platform_label + " · " + leadPage.selectedLead.region_label : ""; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                                             }
                                         }
                                     }
@@ -2160,12 +2192,12 @@ ApplicationWindow {
                                                 Layout.fillWidth: true
                                                 Text { text: leadPage.selectedLead ? leadPage.selectedLead.intent_label + "意向" : ""; color: window.green; font.pixelSize: 18; font.weight: Font.DemiBold }
                                                 Item { Layout.fillWidth: true }
-                                                Text { text: leadPage.selectedLead ? leadPage.selectedLead.status_label : ""; color: window.blue; font.pixelSize: 11; elide: Text.ElideRight }
+                                                Text { text: leadPage.selectedLead ? leadPage.selectedLead.status_label : ""; color: window.blue; font.pixelSize: 12; elide: Text.ElideRight }
                                             }
-                                            Text { text: "人工筛选后可加入互动中心"; color: window.muted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                            Text { text: "人工筛选后可加入互动中心"; color: window.muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                                         }
                                     }
-                                    Text { text: "评论原文"; color: window.muted; font.pixelSize: 11; Layout.preferredHeight: 16 }
+                                    Text { text: "评论原文"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredHeight: 16 }
                                     Rectangle {
                                         Layout.fillWidth: true
                                         Layout.preferredHeight: 106
@@ -2176,20 +2208,20 @@ ApplicationWindow {
                                         Text { anchors.fill: parent; anchors.margins: 10; text: leadPage.selectedLead ? leadPage.selectedLead.comment : ""; color: window.ink; font.pixelSize: 12; wrapMode: Text.WordWrap; maximumLineCount: 5; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter }
                                     }
                                     ColumnLayout { Layout.fillWidth: true; spacing: 3; Layout.preferredHeight: 35
-                                        Text { text: "评论时间"; color: window.muted; font.pixelSize: 10 }
-                                        Text { text: leadPage.selectedLead ? leadPage.selectedLead.comment_time : ""; color: window.ink; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Text { text: "评论时间"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                        Text { text: leadPage.selectedLead ? leadPage.selectedLead.comment_time : ""; color: window.ink; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true; elide: Text.ElideRight }
                                     }
                                     ColumnLayout { Layout.fillWidth: true; spacing: 3; Layout.preferredHeight: 35
-                                        Text { text: "地区"; color: window.muted; font.pixelSize: 10 }
-                                        Text { text: leadPage.selectedLead ? leadPage.selectedLead.region_label : "未识别"; color: window.ink; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Text { text: "地区"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                        Text { text: leadPage.selectedLead ? leadPage.selectedLead.region_label : "未识别"; color: window.ink; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true; elide: Text.ElideRight }
                                     }
                                     Item { Layout.fillHeight: true }
                                 }
                                 ColumnLayout {
                                     visible: leadPage.selectedLead === null; Layout.fillWidth: true; Layout.fillHeight: true
                                     Item { Layout.fillHeight: true }
-                                    Text { text: "选择一条线索"; color: window.muted; font.pixelSize: 13; Layout.alignment: Qt.AlignHCenter }
-                                    Text { text: "点击左侧列表查看完整评论和详情"; color: "#60748f"; font.pixelSize: 11; Layout.alignment: Qt.AlignHCenter }
+                                    Text { text: "选择一条线索"; color: window.ink; font.pixelSize: 15; font.family: window.uiFontFamily; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignHCenter }
+                                    Text { text: "点击左侧列表查看完整评论和详情"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.alignment: Qt.AlignHCenter }
                                     Item { Layout.fillHeight: true }
                                 }
                                 AppButton {
@@ -2388,18 +2420,18 @@ ApplicationWindow {
 
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 30
-                    spacing: 14
+                    anchors.margins: window.pagePadding
+                    spacing: 16
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "互动中心"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
-                        Text { text: "共 " + backend.interactionTotal + " 条"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 8 }
+                        Text { text: "互动中心"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                        Text { text: "共 " + backend.interactionTotal + " 条"; color: window.muted; font.pixelSize: 13; font.family: window.uiFontFamily; Layout.leftMargin: 8 }
                         Item { Layout.fillWidth: true }
                         AppButton {
                             text: "按任务导出"
                             onClicked: backend.exportInteractionsByTask("", "", "")
                             contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
-                            background: Rectangle { radius: 9; color: "transparent"; border.color: parent.hovered ? window.blue : "#365174" }
+                            background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : "transparent"; border.color: parent.hovered ? window.blue : "#365174" }
                         }
                         CheckBox {
                             id: realSendSwitch
@@ -2421,33 +2453,34 @@ ApplicationWindow {
                             Layout.preferredWidth: 104
                             Layout.minimumWidth: 104
                             Layout.maximumWidth: 104
-                            contentItem: Text { text: realSendSwitch.text; color: realSendSwitch.checked ? "#ff9696" : window.muted; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
+                            contentItem: Text { text: realSendSwitch.text; color: realSendSwitch.checked ? window.danger : window.muted; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
                             indicator: Rectangle {
                                 implicitWidth: 16; implicitHeight: 16
                                 x: 0; y: (realSendSwitch.height - height) / 2
                                 radius: 4
                                 color: realSendSwitch.checked ? "#e97583" : "transparent"
                                 border.color: realSendSwitch.checked ? "#e97583" : "#7187a3"
-                                Text { anchors.centerIn: parent; text: "✓"; visible: realSendSwitch.checked; color: "#ffffff"; font.pixelSize: 11 }
+                                Text { anchors.centerIn: parent; text: "✓"; visible: realSendSwitch.checked; color: "#ffffff"; font.pixelSize: 12 }
                             }
                         }
                         AppButton {
                             text: "回复模板"
                             onClicked: templateDialog.open()
-                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
-                            background: Rectangle { radius: 9; color: "transparent"; border.color: "#365174" }
+                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : "transparent"; border.color: parent.hovered ? window.blue : "#365174" }
                         }
                         AppButton {
                             text: "刷新"
                             onClicked: interactionPage2.requestInteractionRefresh()
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { radius: 9; color: window.panel2; border.color: window.line }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                         }
                     }
                     Text {
                         text: interactionPage2.realSendEnabled ? "警告：真实发送已开启，点击发送后会执行平台最终发送动作" : (interactionPage2.activeType === "private_message" ? "完整私信内容与人工审核 · 当前仅填入，不点击发送" : "完整回复内容与人工审核 · 当前仅填入，不点击发送")
                         color: interactionPage2.realSendEnabled ? "#ff9696" : window.muted
-                        font.pixelSize: 12
+                        font.pixelSize: 13
+                        font.family: window.uiFontFamily
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -2457,14 +2490,14 @@ ApplicationWindow {
                             model: interactionPage2.interactionTypeOptions
                             delegate: AppButton {
                                 Layout.preferredWidth: 112
-                                Layout.preferredHeight: 32
+                                Layout.preferredHeight: window.controlHeight
                                 text: modelData.label
                                 onClicked: interactionPage2.selectInteractionType(modelData.key)
                                 contentItem: Text { text: parent.text; color: interactionPage2.activeType === modelData.key ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
-                                background: Rectangle { radius: 8; color: interactionPage2.activeType === modelData.key ? "#1b477b" : window.panel2; border.color: interactionPage2.activeType === modelData.key ? "#4776aa" : window.line }
+                                background: Rectangle { radius: window.smallRadius; color: interactionPage2.activeType === modelData.key ? "#1b477b" : window.panel2; border.color: interactionPage2.activeType === modelData.key ? "#4776aa" : window.line }
                             }
                         }
-                        Text { text: interactionPage2.activeType === "private_message" ? "按用户主页定位，不依赖来源评论" : "按来源作品定位评论并回复"; color: window.muted; font.pixelSize: 11; Layout.leftMargin: 5 }
+                        Text { text: interactionPage2.activeType === "private_message" ? "按用户主页定位，不依赖来源评论" : "按来源作品定位评论并回复"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.leftMargin: 5 }
                         Item { Layout.fillWidth: true }
                     }
                     RowLayout {
@@ -2478,7 +2511,7 @@ ApplicationWindow {
                                 text: modelData.label
                                 onClicked: interactionPage2.selectStatus(modelData.key)
                                 contentItem: Text { text: parent.text; color: interactionPage2.activeStatus === modelData.key ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
-                                background: Rectangle { radius: 9; color: interactionPage2.activeStatus === modelData.key ? "#1b477b" : window.panel2; border.color: interactionPage2.activeStatus === modelData.key ? "#4776aa" : window.line }
+                             background: Rectangle { radius: window.smallRadius; color: interactionPage2.activeStatus === modelData.key ? "#1b477b" : window.panel2; border.color: interactionPage2.activeStatus === modelData.key ? "#4776aa" : window.line }
                             }
                         }
                         Item { Layout.fillWidth: true }
@@ -2492,7 +2525,7 @@ ApplicationWindow {
                             delegate: darkComboDelegate
                             onActivated: interactionPage2.requestInteractionRefresh()
                             contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 10 }
-                            background: Rectangle { radius: 8; color: window.panel; border.color: window.line }
+                             background: Rectangle { radius: window.smallRadius; color: window.panel; border.color: parent.hovered ? window.blue : window.line }
                         }
                         ComboBox {
                             id: accountFilter
@@ -2511,7 +2544,7 @@ ApplicationWindow {
                         visible: interactionPage2.activeStatus === "queued"
                         Layout.fillWidth: true
                         spacing: 9
-                        Text { text: "待发送多选：" + interactionPage2.selectedDraftIds.length + " 条"; color: window.muted; font.pixelSize: 11 }
+                        Text { text: "待发送多选：" + interactionPage2.selectedDraftIds.length + " 条"; color: window.muted; font.pixelSize: 12 }
                         ComboBox {
                             id: bulkAccountFilter
                             Layout.preferredWidth: 230
@@ -2539,7 +2572,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: 13
-                        color: window.panel
+                        color: window.surface
                         border.color: window.line
                         ColumnLayout {
                             anchors.fill: parent
@@ -2547,14 +2580,15 @@ ApplicationWindow {
                             spacing: 0
                             RowLayout {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 38
-                                Text { text: interactionPage2.activeStatus === "queued" ? "选择" : "平台"; color: window.muted; Layout.preferredWidth: 64; Layout.minimumWidth: 64; leftPadding: 0; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                                Text { text: interactionPage2.activeType === "private_message" ? "用户与私信目标" : "用户与原评论"; color: window.muted; Layout.preferredWidth: 260; Layout.minimumWidth: 220; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                                Text { text: interactionPage2.activeType === "private_message" ? "完整私信内容" : "完整回复话术"; color: window.muted; Layout.fillWidth: true; Layout.minimumWidth: 220; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                                Text { text: "账号 / 操作"; color: window.muted; Layout.preferredWidth: 300; Layout.minimumWidth: 250; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                Layout.preferredHeight: 42
+                                Text { text: interactionPage2.activeStatus === "queued" ? "选择" : "平台"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: 64; Layout.minimumWidth: 64; leftPadding: 0; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                Text { text: interactionPage2.activeType === "private_message" ? "用户与私信目标" : "用户与原评论"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: 260; Layout.minimumWidth: 220; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                Text { text: interactionPage2.activeType === "private_message" ? "完整私信内容" : "完整回复话术"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true; Layout.minimumWidth: 220; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                                Text { text: "账号 / 操作"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: 300; Layout.minimumWidth: 250; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                             }
                             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
-                            ListView {
+                             ListView {
+                                 id: interactionListView
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
@@ -2571,7 +2605,7 @@ ApplicationWindow {
                                         replyEditor.visible ? replyEditor.implicitHeight : replyText.implicitHeight
                                     )
                                     height: Math.max(138, Math.min(230, textBlockHeight + 94))
-                                    color: index % 2 === 0 ? "transparent" : "#17273d"
+                                     color: index % 2 === 0 ? "transparent" : window.surfaceRaised
                                     RowLayout {
                                         anchors.fill: parent
                                         anchors.leftMargin: 8
@@ -2590,7 +2624,7 @@ ApplicationWindow {
                                                  sourceComponent: userPlatformIconComponent
                                                  onLoaded: item.platform = modelData.platform
                                              }
-                                             Text { anchors.top: parent.top; anchors.topMargin: 36; anchors.horizontalCenter: parent.horizontalCenter; width: 64; text: modelData.platform_label; color: window.blue; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; font.pixelSize: 9 }
+                                             Text { anchors.top: parent.top; anchors.topMargin: 36; anchors.horizontalCenter: parent.horizontalCenter; width: 64; text: modelData.platform_label; color: window.blue; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; font.pixelSize: 12 }
                                             Rectangle {
                                                 visible: interactionPage2.activeStatus === "queued"
                                                          && String(modelData.status || "") === "queued"
@@ -2612,8 +2646,8 @@ ApplicationWindow {
                                             Layout.topMargin: 12
                                             spacing: 5
                                             Text { text: modelData.nickname; color: window.ink; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight; horizontalAlignment: interactionPage2.activeStatus === "draft" ? Text.AlignLeft : Text.AlignHCenter; font.pixelSize: 13 }
-                                            Text { text: interactionPage2.activeType === "private_message" ? (modelData.platform_user_id ? "用户ID：" + modelData.platform_user_id : "私信目标用户") : (modelData.task_id > 0 ? "任务#" + modelData.task_id : "未关联任务"); color: window.blue; Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: interactionPage2.activeStatus === "draft" ? Text.AlignLeft : Text.AlignHCenter; font.pixelSize: 10 }
-                                            Text { text: modelData.comment_time; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: interactionPage2.activeStatus === "draft" ? Text.AlignLeft : Text.AlignHCenter; font.pixelSize: 10 }
+                                            Text { text: interactionPage2.activeType === "private_message" ? (modelData.platform_user_id ? "用户ID：" + modelData.platform_user_id : "私信目标用户") : (modelData.task_id > 0 ? "任务#" + modelData.task_id : "未关联任务"); color: window.blue; Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: interactionPage2.activeStatus === "draft" ? Text.AlignLeft : Text.AlignHCenter; font.pixelSize: 12 }
+                                            Text { text: modelData.comment_time; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; horizontalAlignment: interactionPage2.activeStatus === "draft" ? Text.AlignLeft : Text.AlignHCenter; font.pixelSize: 12 }
                                             Text { id: originalText; text: interactionPage2.activeType === "private_message" ? (modelData.profile_url ? "个人主页：" + modelData.profile_url : "未记录个人主页地址") : modelData.original_comment; color: "#c8d7ea"; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight; horizontalAlignment: interactionPage2.activeStatus === "draft" ? Text.AlignLeft : Text.AlignHCenter; font.pixelSize: 12 }
                                         }
                                          ColumnLayout {
@@ -2622,7 +2656,7 @@ ApplicationWindow {
                                              Layout.alignment: Qt.AlignTop
                                              Layout.topMargin: 10
                                              spacing: 5
-                                             Text { visible: interactionPage2.activeStatus === "draft"; text: interactionPage2.activeType === "private_message" ? "私信内容（可编辑）" : "回复内容（可编辑）"; color: window.muted; font.pixelSize: 10 }
+                                             Text { visible: interactionPage2.activeStatus === "draft"; text: interactionPage2.activeType === "private_message" ? "私信内容（可编辑）" : "回复内容（可编辑）"; color: window.muted; font.pixelSize: 12 }
                                              TextArea {
                                                  id: replyEditor
                                                  visible: interactionPage2.activeStatus === "draft"
@@ -2651,21 +2685,21 @@ ApplicationWindow {
                                                          for (var i = 0; i < count; i++) if (model[i].id === modelData.template_id) return i
                                                          return count > 0 ? 0 : -1
                                                      }
-                                                     contentItem: Text { text: parent.displayText; color: window.muted; verticalAlignment: Text.AlignVCenter; leftPadding: 8; elide: Text.ElideRight; font.pixelSize: 10 }
+                                                     contentItem: Text { text: parent.displayText; color: window.muted; verticalAlignment: Text.AlignVCenter; leftPadding: 8; elide: Text.ElideRight; font.pixelSize: 12 }
                                                      background: Rectangle { radius: 7; color: window.panel; border.color: window.line }
                                                  }
                                                  AppButton {
                                                      text: "套用"
                                                      enabled: templateChooser.currentValue !== undefined && templateChooser.currentValue !== ""
                                                      onClicked: interactionPage2.dispatchAction(modelData.draft_id, "apply_template", 0, "", String(templateChooser.currentValue || ""))
-                                                     contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                     contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                      background: Rectangle { radius: 7; color: "transparent"; border.color: window.line }
                                                  }
                                                  AppButton {
                                                      text: "保存"
                                                      enabled: replyEditor.text.trim().length > 0
                                                      onClicked: interactionPage2.dispatchAction(modelData.draft_id, "update_content", 0, replyEditor.text, "")
-                                                     contentItem: Text { text: parent.text; color: parent.enabled ? window.green : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                     contentItem: Text { text: parent.text; color: parent.enabled ? window.green : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                      background: Rectangle { radius: 7; color: "transparent"; border.color: window.line }
                                                  }
                                              }
@@ -2677,10 +2711,10 @@ ApplicationWindow {
                                             Layout.alignment: Qt.AlignTop
                                             Layout.topMargin: 10
                                             spacing: 7
-                                            Text { visible: interactionPage2.activeStatus === "failed"; text: "失败原因：" + (modelData.failure_reason || "未记录"); color: "#ff9b9b"; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 11 }
-                                            Text { visible: interactionPage2.activeStatus === "queued" && String(modelData.status || "") === "sending"; text: "浏览器发送中，请等待结果…"; color: "#f5c66a"; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 11 }
-                                            Text { visible: interactionPage2.activeStatus === "sent"; text: "回复账号：" + modelData.reply_account_name; color: window.muted; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; font.pixelSize: 11 }
-                                            Text { visible: interactionPage2.activeStatus === "sent"; text: "回复状态：" + (modelData.reply_status_label || "已回复") + " · 客户回复：" + (modelData.customer_replied_label || "否"); color: window.green; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 10 }
+                                            Text { visible: interactionPage2.activeStatus === "failed"; text: "失败原因：" + (modelData.failure_reason || "未记录"); color: "#ff9b9b"; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 12 }
+                                            Text { visible: interactionPage2.activeStatus === "queued" && String(modelData.status || "") === "sending"; text: "浏览器发送中，请等待结果…"; color: "#f5c66a"; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 12 }
+                                            Text { visible: interactionPage2.activeStatus === "sent"; text: "回复账号：" + modelData.reply_account_name; color: window.muted; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; font.pixelSize: 12 }
+                                            Text { visible: interactionPage2.activeStatus === "sent"; text: "回复状态：" + (modelData.reply_status_label || "已回复") + " · 客户回复：" + (modelData.customer_replied_label || "否"); color: window.green; Layout.fillWidth: true; wrapMode: Text.WordWrap; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 12 }
                                             ComboBox {
                                                 visible: interactionPage2.activeStatus === "queued"
                                                          && String(modelData.status || "") === "queued"
@@ -2699,7 +2733,7 @@ ApplicationWindow {
                                                     if (Number(currentValue || 0) > 0)
                                                         interactionPage2.dispatchAction(modelData.draft_id, "assign_account", currentValue, "", "")
                                                 }
-                                                contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter; leftPadding: 4; rightPadding: 4; elide: Text.ElideRight; font.pixelSize: 11 }
+                                                contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignHCenter; leftPadding: 4; rightPadding: 4; elide: Text.ElideRight; font.pixelSize: 12 }
                                                 background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
                                             }
                                             Flow {
@@ -2718,7 +2752,7 @@ ApplicationWindow {
                                                           ? "处理中…"
                                                           : (interactionPage2.activeType === "private_message" ? "转到评论回复" : "转到私信")
                                                     onClicked: interactionPage2.switchRowType(modelData)
-                                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                     background: Rectangle { radius: 7; color: parent.hovered && parent.enabled ? "#263e63" : "transparent"; border.color: parent.enabled ? "#365174" : window.line }
                                                 }
                                                 AppButton {
@@ -2732,7 +2766,7 @@ ApplicationWindow {
                                                     // 必须提交当前编辑框内容，不能重新读取初始的
                                                     // modelData.content，否则人工修改会被默认话术覆盖。
                                                     onClicked: interactionPage2.dispatchAction(modelData.draft_id, "enter_send", 0, replyEditor.text, "")
-                                                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                     background: Rectangle { radius: 7; color: "transparent"; border.color: "#365174" }
                                                 }
                                                 AppButton {
@@ -2743,7 +2777,7 @@ ApplicationWindow {
                                                      enabled: String(modelData.status || "") === "queued"
                                                               && interactionPage2.effectiveAccountId(modelData) > 0 && !interactionPage2.isSendPending(modelData.draft_id)
                                                      onClicked: interactionPage2.sendDrafts([modelData.draft_id], interactionPage2.effectiveAccountId(modelData))
-                                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                     background: Rectangle { radius: 7; color: "transparent"; border.color: window.line }
                                                 }
                                                 AppButton {
@@ -2755,7 +2789,7 @@ ApplicationWindow {
                                                              && !interactionPage2.isSendPending(modelData.draft_id)
                                                     text: "退回待生成"
                                                     onClicked: interactionPage2.dispatchAction(modelData.draft_id, "return_queued", 0, "", "")
-                                                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                     background: Rectangle { radius: 7; color: "transparent"; border.color: "#365174" }
                                                 }
                                                 AppButton {
@@ -2765,7 +2799,7 @@ ApplicationWindow {
                                                     enabled: !interactionPage2.isActionPending(modelData.draft_id)
                                                     text: "退回待生成"
                                                     onClicked: interactionPage2.dispatchAction(modelData.draft_id, "return_failed", 0, "", "")
-                                                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                     background: Rectangle { radius: 7; color: "transparent"; border.color: window.line }
                                                 }
                                                 AppButton {
@@ -2778,7 +2812,7 @@ ApplicationWindow {
                                                     enabled: !interactionPage2.isActionPending(modelData.draft_id)
                                                     text: "删除"
                                                     onClicked: interactionPage2.dispatchAction(modelData.draft_id, "delete", 0, "", "")
-                                                    contentItem: Text { text: parent.text; color: "#ff9b9b"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                    contentItem: Text { text: parent.text; color: "#ff9b9b"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                     background: Rectangle { radius: 7; color: "transparent"; border.color: window.line }
                                                 }
                                             }
@@ -2786,24 +2820,32 @@ ApplicationWindow {
                                     }
                                 }
                             }
+                            ColumnLayout {
+                                visible: interactionListView.count === 0
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 110
+                                spacing: 6
+                                Text { text: "暂无互动记录"; color: window.ink; font.pixelSize: 15; font.family: window.uiFontFamily; font.weight: Font.DemiBold; Layout.alignment: Qt.AlignHCenter }
+                                Text { text: interactionPage2.activeStatus === "sent" ? "发送完成后，记录会保留在这里。" : "生成回复或私信草稿后，会显示在这里。"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.alignment: Qt.AlignHCenter }
+                            }
                             RowLayout {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 40
-                                Text { text: interactionPage2.activeType === "private_message" ? "当前页显示完整私信正文和私信目标" : "当前页显示完整回复正文和原评论"; color: window.muted; font.pixelSize: 11 }
+                                Text { text: interactionPage2.activeType === "private_message" ? "当前页显示完整私信正文和私信目标" : "当前页显示完整回复正文和原评论"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily }
                                 Item { Layout.fillWidth: true }
                                 AppButton {
                                     text: "上一页"
                                     enabled: backend.interactionPage > 1
                                     onClicked: interactionPage2.requestInteractionPage(backend.interactionPage - 1)
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
                                 }
-                                Text { text: backend.interactionPages ? backend.interactionPage + " / " + backend.interactionPages : "暂无数据"; color: window.muted; font.pixelSize: 11 }
+                                Text { text: backend.interactionPages ? backend.interactionPage + " / " + backend.interactionPages : "暂无数据"; color: window.muted; font.pixelSize: 12 }
                                 AppButton {
                                     text: "下一页"
                                     enabled: backend.interactionPage < backend.interactionPages
                                     onClicked: interactionPage2.requestInteractionPage(backend.interactionPage + 1)
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
                                 }
                             }
@@ -3359,12 +3401,12 @@ ApplicationWindow {
                 ColumnLayout {
                     visible: publishPage.publishTab === "account"
                     anchors.fill: parent
-                    anchors.margins: 22
+                    anchors.margins: window.pagePadding
                     spacing: 12
                     RowLayout {
                         Layout.fillWidth: true; Layout.preferredHeight: 48
                         ColumnLayout { Layout.fillWidth: true; spacing: 2
-                            Text { text: "账号信息"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
+                            Text { text: "账号信息"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                             Text { text: "按平台查看账号主页同步的视频、图文和评论详情"; color: window.muted; font.pixelSize: 12 }
                             Text {
                                 text: backend.publishAccountContentSyncStatus === "success"
@@ -3373,22 +3415,22 @@ ApplicationWindow {
                                          ? "读取提示：" + backend.publishAccountContentSyncError
                                          : "选择账号后点击“同步账号作品”，读取该账号主页内容")
                                 color: backend.publishAccountContentSyncStatus === "success" ? window.green : window.muted
-                                font.pixelSize: 10
+                                font.pixelSize: 12
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
                             }
                         }
-                        AppButton { text: "同步账号作品"; Layout.preferredWidth: 116; Layout.preferredHeight: 34
+                        AppButton { text: "同步账号作品"; Layout.preferredWidth: 116; Layout.preferredHeight: window.controlHeight
                             enabled: Number(publishPage.accountInfoAccountId || 0) > 0
                             onClicked: backend.syncAccountContents(Number(publishPage.accountInfoAccountId), publishPage.accountInfoPlatform)
-                            contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: parent.enabled ? window.blue : window.panel2; border.color: window.line }
                         }
                     }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 54; radius: 9; color: window.panel; border.color: window.line
                         RowLayout { anchors.fill: parent; anchors.margins: 10; spacing: 9
-                            Text { text: "平台"; color: window.muted; font.pixelSize: 11 }
-                            ComboBox { id: accountInfoPlatformChooser; Layout.preferredWidth: 130; Layout.preferredHeight: 32
+                            Text { text: "平台"; color: window.muted; font.pixelSize: 12 }
+                            ComboBox { id: accountInfoPlatformChooser; Layout.preferredWidth: 130; Layout.preferredHeight: window.controlHeight
                                 model: publishPage.accountInfoPlatformOptions; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                 currentIndex: {
                                     for (var i = 0; i < model.length; i++)
@@ -3399,8 +3441,8 @@ ApplicationWindow {
                                 contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 }
                                 background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
                             }
-                            Text { text: "账号"; color: window.muted; font.pixelSize: 11; Layout.leftMargin: 10 }
-                            ComboBox { id: accountInfoAccountChooser; Layout.fillWidth: true; Layout.preferredHeight: 32
+                            Text { text: "账号"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 10 }
+                            ComboBox { id: accountInfoAccountChooser; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight
                                 model: publishPage.accountOptionsFor(publishPage.accountInfoPlatform); textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                 currentIndex: {
                                     for (var i = 0; i < model.length; i++)
@@ -3412,8 +3454,8 @@ ApplicationWindow {
                                 contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9; elide: Text.ElideRight }
                                 background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
                             }
-                            Text { text: "类型"; color: window.muted; font.pixelSize: 11; Layout.leftMargin: 10 }
-                            ComboBox { id: accountInfoTypeChooser; Layout.preferredWidth: 120; Layout.preferredHeight: 32
+                            Text { text: "类型"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 10 }
+                            ComboBox { id: accountInfoTypeChooser; Layout.preferredWidth: 120; Layout.preferredHeight: window.controlHeight
                                 model: [{value: "", label: "全部内容"}, {value: "video", label: "视频"}, {value: "image", label: "图文"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                 onActivated: { publishPage.accountInfoType = String(currentValue || ""); backend.refreshAccountContents(Number(publishPage.accountInfoAccountId), publishPage.accountInfoPlatform, publishPage.accountInfoType) }
                                 contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 }
@@ -3426,10 +3468,10 @@ ApplicationWindow {
                             ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: 8
                                 RowLayout { Layout.fillWidth: true
                                     Text { text: "作品与图文"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium }
-                                    Text { text: backend.publishAccountContentTotal + " 条"; color: window.muted; font.pixelSize: 10; Layout.leftMargin: 7 }
+                                    Text { text: backend.publishAccountContentTotal + " 条"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 7 }
                                     Item { Layout.fillWidth: true }
                                     AppButton { text: "刷新"; Layout.preferredWidth: 62; Layout.preferredHeight: 28; onClicked: backend.refreshAccountContents(Number(publishPage.accountInfoAccountId), publishPage.accountInfoPlatform, publishPage.accountInfoType)
-                                        contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                        contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                         background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                     }
                                 }
@@ -3440,37 +3482,37 @@ ApplicationWindow {
                                             ColumnLayout { Layout.fillWidth: true; spacing: 4
                                                 RowLayout { Layout.fillWidth: true
                                                     Text { text: modelData.title || "未命名内容"; color: window.ink; font.pixelSize: 12; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
-                                                    Text { text: modelData.content_type_label || "内容"; color: window.blue; font.pixelSize: 10 }
+                                                    Text { text: modelData.content_type_label || "内容"; color: window.blue; font.pixelSize: 12 }
                                                 }
-                                                Text { text: (modelData.published_at || "暂无发布时间") + "  ·  点赞 " + (modelData.like_count || 0) + "  ·  评论 " + (modelData.comment_count || 0); color: window.muted; font.pixelSize: 10 }
+                                                Text { text: (modelData.published_at || "暂无发布时间") + "  ·  点赞 " + (modelData.like_count || 0) + "  ·  评论 " + (modelData.comment_count || 0); color: window.muted; font.pixelSize: 12 }
                                             }
                                             AppButton { text: "评论详情"; Layout.preferredWidth: 72; Layout.preferredHeight: 28; onClicked: backend.refreshContentComments(Number(modelData.id))
-                                                contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                 background: Rectangle { radius: 7; color: "transparent"; border.color: parent.hovered ? window.blue : window.line }
                                             }
                                             AppButton { text: "打开原文"; Layout.preferredWidth: 72; Layout.preferredHeight: 28; enabled: String(modelData.url || "") !== ""; onClicked: backend.openSourceUrl(String(modelData.url || ""))
-                                                contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                 background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                             }
                                         }
                                     }
                                 }
-                                Text { visible: accountContentList.count === 0; text: Number(publishPage.accountInfoAccountId || 0) > 0 ? "暂无该账号主页同步的作品" : "请选择平台和账号"; color: window.muted; font.pixelSize: 11; Layout.alignment: Qt.AlignHCenter }
+                                Text { visible: accountContentList.count === 0; text: Number(publishPage.accountInfoAccountId || 0) > 0 ? "暂无该账号主页同步的作品" : "请选择平台和账号"; color: window.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignHCenter }
                             }
                         }
                         Rectangle { Layout.preferredWidth: 330; Layout.fillHeight: true; radius: 10; color: window.panel; border.color: window.line
                             ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: 8
                                 Text { text: "评论区内容"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium }
-                                Text { text: "选中作品后加载评论；保留原文和楼中楼标识"; color: window.muted; font.pixelSize: 10; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                Text { text: "选中作品后加载评论；保留原文和楼中楼标识"; color: window.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                 ListView { id: accountCommentList; Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6; model: backend.publishAccountContentComments
                                     delegate: Rectangle { width: accountCommentList.width; height: 62; radius: 7; color: index % 2 === 0 ? "#172840" : "#132238"
                                         ColumnLayout { anchors.fill: parent; anchors.margins: 8; spacing: 3
-                                            Text { text: (modelData.nickname || "匿名用户") + (Number(modelData.is_reply || 0) ? " · 楼中楼" : ""); color: window.ink; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
-                                            Text { text: modelData.content || "暂无评论原文"; color: "#c8d7ea"; font.pixelSize: 10; Layout.fillWidth: true; maximumLineCount: 2; elide: Text.ElideRight }
+                                            Text { text: (modelData.nickname || "匿名用户") + (Number(modelData.is_reply || 0) ? " · 楼中楼" : ""); color: window.ink; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                            Text { text: modelData.content || "暂无评论原文"; color: "#c8d7ea"; font.pixelSize: 12; Layout.fillWidth: true; maximumLineCount: 2; elide: Text.ElideRight }
                                         }
                                     }
                                 }
-                                Text { visible: accountCommentList.count === 0; text: "选择作品查看评论"; color: window.muted; font.pixelSize: 11; Layout.alignment: Qt.AlignHCenter }
+                                Text { visible: accountCommentList.count === 0; text: "选择作品查看评论"; color: window.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignHCenter }
                             }
                         }
                     }
@@ -3478,29 +3520,29 @@ ApplicationWindow {
 
                 ColumnLayout {
                     visible: publishPage.publishTab === "generation"
-                    anchors.fill: parent; anchors.margins: 22; spacing: 12
+                    anchors.fill: parent; anchors.margins: window.pagePadding; spacing: 12
                     RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 48
                         ColumnLayout { Layout.fillWidth: true; spacing: 2
-                            Text { text: "内容生成"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
+                            Text { text: "内容生成"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                             Text { text: "参考选题生成系统，先生成候选内容，再一键导入发布草稿"; color: window.muted; font.pixelSize: 12 }
                         }
-                        Rectangle { Layout.preferredWidth: 138; Layout.preferredHeight: 30; radius: 15; color: "#203a48"; border.color: "#2e5362"; Text { anchors.centerIn: parent; text: backend.diagnosticLlmApi.enabled && backend.diagnosticLlmApi.configured ? "智能 API 已启用" : "本地模板兜底"; color: window.green; font.pixelSize: 10 } }
-                        Text { visible: publishPage.generationNotice.length > 0; text: publishPage.generationNotice; color: publishPage.generationNotice.indexOf("未返回") >= 0 ? window.amber : window.green; font.pixelSize: 10; elide: Text.ElideRight; Layout.preferredWidth: 230 }
+                        Rectangle { Layout.preferredWidth: 138; Layout.preferredHeight: 30; radius: 15; color: "#203a48"; border.color: "#2e5362"; Text { anchors.centerIn: parent; text: backend.diagnosticLlmApi.enabled && backend.diagnosticLlmApi.configured ? "智能 API 已启用" : "本地模板兜底"; color: window.green; font.pixelSize: 12 } }
+                        Text { visible: publishPage.generationNotice.length > 0; text: publishPage.generationNotice; color: publishPage.generationNotice.indexOf("未返回") >= 0 ? window.amber : window.green; font.pixelSize: 12; elide: Text.ElideRight; Layout.preferredWidth: 230 }
                     }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 82; radius: 10; color: window.panel; border.color: window.line
                         ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: 7
                             RowLayout { Layout.fillWidth: true
                                 Text { text: "生成条件"; color: window.ink; font.pixelSize: 12; font.weight: Font.Medium }
-                                Text { text: backend.diagnosticLlmApi.enabled && backend.diagnosticLlmApi.configured ? "当前优先调用智能 API，失败自动切换本地模板" : "未配置智能 API 时自动使用本地模板"; color: window.muted; font.pixelSize: 10; Layout.leftMargin: 8 }
+                                Text { text: backend.diagnosticLlmApi.enabled && backend.diagnosticLlmApi.configured ? "当前优先调用智能 API，失败自动切换本地模板" : "未配置智能 API 时自动使用本地模板"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 8 }
                             }
                             RowLayout { Layout.fillWidth: true; spacing: 8
-                                TextField { id: generationKeyword; Layout.fillWidth: true; Layout.preferredHeight: 34; placeholderText: "输入选题或关键词，例如：互联网洗衣"; placeholderTextColor: "#7187a3"; color: window.ink; leftPadding: 10; background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line } }
-                                ComboBox { id: generationPlatform; Layout.preferredWidth: 130; Layout.preferredHeight: 34; model: publishPage.platformFilterOptions; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
+                                TextField { id: generationKeyword; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight; placeholderText: "输入选题或关键词，例如：互联网洗衣"; placeholderTextColor: "#7187a3"; color: window.ink; leftPadding: 10; background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line } }
+                                ComboBox { id: generationPlatform; Layout.preferredWidth: 130; Layout.preferredHeight: window.controlHeight; model: publishPage.platformFilterOptions; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                     contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 }
                                     background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
                                 }
-                                AppButton { text: publishPage.generationPending ? "生成中…" : "生成内容"; Layout.preferredWidth: 100; Layout.preferredHeight: 34; enabled: generationKeyword.text.trim() !== "" && !publishPage.generationPending; onClicked: { publishPage.generationPending = true; publishPage.generationNotice = "正在调用智能 API…"; backend.generateContent(generationKeyword.text, String(generationPlatform.currentValue || ""), "") }
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                AppButton { text: publishPage.generationPending ? "生成中…" : "生成内容"; Layout.preferredWidth: 100; Layout.preferredHeight: window.controlHeight; enabled: generationKeyword.text.trim() !== "" && !publishPage.generationPending; onClicked: { publishPage.generationPending = true; publishPage.generationNotice = "正在调用智能 API…"; backend.generateContent(generationKeyword.text, String(generationPlatform.currentValue || ""), "") }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 8; color: parent.enabled ? window.blue : window.panel2; border.color: window.line }
                                 }
                             }
@@ -3510,41 +3552,41 @@ ApplicationWindow {
                         Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; radius: 10; color: window.panel; border.color: window.line
                             ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: 8
                                 Text { text: "生成结果"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium }
-                                Text { text: backend.publishGeneratedTotal + " 条候选内容"; color: window.muted; font.pixelSize: 10 }
+                                Text { text: backend.publishGeneratedTotal + " 条候选内容"; color: window.muted; font.pixelSize: 12 }
                                 ListView { id: generatedContentList; Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 8; model: backend.publishGeneratedContents
                                             delegate: Rectangle { width: generatedContentList.width; height: (modelData.topics && modelData.topics.length > 0) || String(modelData.outline || "") !== "" ? 146 : 118; radius: 8; color: index % 2 === 0 ? "#172840" : "#132238"; border.color: window.line
                                                 ColumnLayout { anchors.fill: parent; anchors.margins: 11; spacing: 5
                                                     RowLayout { Layout.fillWidth: true
                                                         Text { text: modelData.title || "未命名内容"; color: window.ink; font.pixelSize: 12; font.weight: Font.Medium; Layout.fillWidth: true; elide: Text.ElideRight }
                                                         AppButton { text: "加入发布"; Layout.preferredWidth: 76; Layout.preferredHeight: 28; onClicked: backend.importGeneratedContent(Number(modelData.id))
-                                                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                             background: Rectangle { radius: 7; color: "transparent"; border.color: parent.hovered ? window.blue : window.line }
                                                         }
                                                         AppButton { text: "删除"; Layout.preferredWidth: 58; Layout.preferredHeight: 28; onClicked: backend.deleteGeneratedContent(Number(modelData.id))
-                                                            contentItem: Text { text: parent.text; color: "#ff9b9b"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                            contentItem: Text { text: parent.text; color: "#ff9b9b"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                             background: Rectangle { radius: 7; color: parent.hovered ? "#3a202b" : "transparent"; border.color: parent.hovered ? "#8b3f50" : window.line }
                                                         }
                                                     }
-                                            Text { text: modelData.body || ""; color: "#c8d7ea"; font.pixelSize: 10; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true; Layout.fillHeight: true }
-                                            Text { visible: modelData.topics && modelData.topics.length > 0; text: "话题：" + ((modelData.topics || []).join("、")); color: window.muted; font.pixelSize: 9; elide: Text.ElideRight; Layout.fillWidth: true }
-                                            Text { visible: String(modelData.outline || "") !== ""; text: "结构：" + String(modelData.outline || ""); color: window.muted; font.pixelSize: 9; elide: Text.ElideRight; Layout.fillWidth: true }
-                                            Text { text: "平台：" + ((modelData.platforms || []).join("、")) + "  ·  来源：" + (modelData.source_type === "local_template" ? "本地模板" : "智能 API"); color: window.muted; font.pixelSize: 9 }
+                                            Text { text: modelData.body || ""; color: "#c8d7ea"; font.pixelSize: 12; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true; Layout.fillHeight: true }
+                                            Text { visible: modelData.topics && modelData.topics.length > 0; text: "话题：" + ((modelData.topics || []).join("、")); color: window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                                            Text { visible: String(modelData.outline || "") !== ""; text: "结构：" + String(modelData.outline || ""); color: window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                                            Text { text: "平台：" + ((modelData.platforms || []).join("、")) + "  ·  来源：" + (modelData.source_type === "local_template" ? "本地模板" : "智能 API"); color: window.muted; font.pixelSize: 12 }
                                         }
                                     }
                                 }
-                                Text { visible: generatedContentList.count === 0; text: "输入选题后点击生成，结果会保存在这里"; color: window.muted; font.pixelSize: 11; Layout.alignment: Qt.AlignHCenter }
+                                Text { visible: generatedContentList.count === 0; text: "输入选题后点击生成，结果会保存在这里"; color: window.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignHCenter }
                             }
                         }
                         Rectangle { Layout.preferredWidth: 330; Layout.fillHeight: true; radius: 10; color: window.panel; border.color: window.line
                             ColumnLayout { anchors.fill: parent; anchors.margins: 14; spacing: 10
                                 Text { text: "生成流程"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium }
-                                Text { text: "选题 → 结构化内容 → 平台版本 → 发布草稿"; color: window.blue; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                                Text { text: "已接入选题生成系统的结构化流程：智能 API 生成完整正文、话题、大纲和评分；接口不可用时自动使用本地模板，不影响发布和采集。"; color: window.muted; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                Text { text: "选题 → 结构化内容 → 平台版本 → 发布草稿"; color: window.blue; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                Text { text: "已接入选题生成系统的结构化流程：智能 API 生成完整正文、话题、大纲和评分；接口不可用时自动使用本地模板，不影响发布和采集。"; color: window.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                 Item { Layout.fillHeight: true }
                                 Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 80; radius: 8; color: "#111d30"; border.color: window.line
                                     ColumnLayout { anchors.fill: parent; anchors.margins: 10
-                                        Text { text: "当前策略"; color: window.muted; font.pixelSize: 10 }
-                                        Text { text: backend.diagnosticLlmApi.enabled && backend.diagnosticLlmApi.configured ? "已启用智能 API：生成结果将保存为可直接发布的完整正文" : "当前使用本地模板：生成失败也不会影响采集与互动"; color: window.ink; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                        Text { text: "当前策略"; color: window.muted; font.pixelSize: 12 }
+                                        Text { text: backend.diagnosticLlmApi.enabled && backend.diagnosticLlmApi.configured ? "已启用智能 API：生成结果将保存为可直接发布的完整正文" : "当前使用本地模板：生成失败也不会影响采集与互动"; color: window.ink; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                     }
                                 }
                             }
@@ -3554,39 +3596,39 @@ ApplicationWindow {
 
                 ColumnLayout {
                     visible: publishPage.publishTab === "messages"
-                    anchors.fill: parent; anchors.margins: 22; spacing: 12
+                    anchors.fill: parent; anchors.margins: window.pagePadding; spacing: 12
                     RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 48
                         ColumnLayout { Layout.fillWidth: true; spacing: 2
-                            Text { text: "消息中心"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
+                            Text { text: "消息中心"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                             Text { text: "同步四个平台账号的全部消息：评论、回复、点赞、@、关注、私信、群通知和系统通知"; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight }
                         }
                         Text { text: "未读 " + backend.publishMessageUnread; color: window.amber; font.pixelSize: 12 }
-                        Text { visible: publishPage.messageActionNotice.length > 0; text: publishPage.messageActionNotice; color: publishPage.messageActionNotice.indexOf("失败") >= 0 ? window.amber : window.green; font.pixelSize: 10; elide: Text.ElideRight; Layout.preferredWidth: 260 }
-                        AppButton { text: "同步消息"; Layout.preferredWidth: 88; Layout.preferredHeight: 32; onClicked: backend.syncPublishedMessages(publishPage.messagePlatform, publishPage.messageAccountId, publishPage.messageType, publishPage.messageUnreadOnly)
-                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                        Text { visible: publishPage.messageActionNotice.length > 0; text: publishPage.messageActionNotice; color: publishPage.messageActionNotice.indexOf("失败") >= 0 ? window.amber : window.green; font.pixelSize: 12; elide: Text.ElideRight; Layout.preferredWidth: 260 }
+                        AppButton { text: "同步消息"; Layout.preferredWidth: 88; Layout.preferredHeight: window.controlHeight; onClicked: backend.syncPublishedMessages(publishPage.messagePlatform, publishPage.messageAccountId, publishPage.messageType, publishPage.messageUnreadOnly)
+                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 7; color: parent.hovered ? "#8bb8ff" : window.blue; border.color: window.blue }
                         }
-                        AppButton { text: "刷新列表"; Layout.preferredWidth: 82; Layout.preferredHeight: 32; onClicked: backend.refreshPublishedMessages(1, publishPage.messagePlatform, publishPage.messageAccountId, publishPage.messageUnreadOnly, publishPage.messageType)
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                        AppButton { text: "刷新列表"; Layout.preferredWidth: 82; Layout.preferredHeight: window.controlHeight; onClicked: backend.refreshPublishedMessages(1, publishPage.messagePlatform, publishPage.messageAccountId, publishPage.messageUnreadOnly, publishPage.messageType)
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                         }
                     }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 54; radius: 9; color: window.panel; border.color: window.line
                         RowLayout { anchors.fill: parent; anchors.margins: 10; spacing: 8
-                            Text { text: "平台"; color: window.muted; font.pixelSize: 11 }
-                            ComboBox { id: messagePlatformChooser; Layout.preferredWidth: 130; Layout.preferredHeight: 32; model: publishPage.platformFilterOptions; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
+                            Text { text: "平台"; color: window.muted; font.pixelSize: 12 }
+                            ComboBox { id: messagePlatformChooser; Layout.preferredWidth: 130; Layout.preferredHeight: window.controlHeight; model: publishPage.platformFilterOptions; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                 onActivated: { publishPage.messagePlatform = String(currentValue || ""); publishPage.resetMessageAccountForPlatform(); messageAccountChooser.currentIndex = 0; backend.refreshPublishedMessages(1, publishPage.messagePlatform, publishPage.messageAccountId, publishPage.messageUnreadOnly, publishPage.messageType) }
                                 contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 }
                                 background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
                             }
-                            Text { text: "账号"; color: window.muted; font.pixelSize: 11; Layout.leftMargin: 8 }
-                            ComboBox { id: messageAccountChooser; Layout.preferredWidth: 210; Layout.preferredHeight: 32; model: publishPage.messageAccountOptions(); textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
+                            Text { text: "账号"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 8 }
+                            ComboBox { id: messageAccountChooser; Layout.preferredWidth: 210; Layout.preferredHeight: window.controlHeight; model: publishPage.messageAccountOptions(); textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                 onActivated: { publishPage.messageAccountId = String(currentValue || "0"); backend.refreshPublishedMessages(1, publishPage.messagePlatform, publishPage.messageAccountId, publishPage.messageUnreadOnly, publishPage.messageType) }
                                 contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9; elide: Text.ElideRight }
                                 background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
                             }
-                            Text { text: "类型"; color: window.muted; font.pixelSize: 11; Layout.leftMargin: 8 }
-                            ComboBox { id: messageTypeChooser; Layout.preferredWidth: 130; Layout.preferredHeight: 32; model: publishPage.messageTypeFilterOptions; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
+                            Text { text: "类型"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 8 }
+                            ComboBox { id: messageTypeChooser; Layout.preferredWidth: 130; Layout.preferredHeight: window.controlHeight; model: publishPage.messageTypeFilterOptions; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                 onActivated: { publishPage.messageType = String(currentValue || ""); backend.refreshPublishedMessages(1, publishPage.messagePlatform, publishPage.messageAccountId, publishPage.messageUnreadOnly, publishPage.messageType) }
                                 contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9; elide: Text.ElideRight }
                                 background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line }
@@ -3601,13 +3643,13 @@ ApplicationWindow {
                         ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: 8
                             RowLayout { Layout.fillWidth: true
                                 Text { text: "会话列表"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium; Layout.fillWidth: true }
-                                Text { text: backend.publishMessageTotal + " 条消息 · " + (backend.publishMessageGroups || []).length + " 个会话"; color: window.muted; font.pixelSize: 10 }
-                                Text { text: publishPage.messageSyncStatusText(); color: backend.publishMessageSyncStatus === "failed" ? window.amber : window.muted; font.pixelSize: 10; elide: Text.ElideRight }
+                                Text { text: backend.publishMessageTotal + " 条消息 · " + (backend.publishMessageGroups || []).length + " 个会话"; color: window.muted; font.pixelSize: 12 }
+                                Text { text: publishPage.messageSyncStatusText(); color: backend.publishMessageSyncStatus === "failed" ? window.amber : window.muted; font.pixelSize: 12; elide: Text.ElideRight }
                             }
                             RowLayout { Layout.fillWidth: true; Layout.fillHeight: true; spacing: 10
                                 Rectangle { Layout.preferredWidth: 280; Layout.fillHeight: true; radius: 8; color: "#101d31"; border.color: window.line
                                     ColumnLayout { anchors.fill: parent; anchors.margins: 8; spacing: 6
-                                        Text { text: "联系人"; color: window.muted; font.pixelSize: 11; Layout.leftMargin: 4 }
+                                        Text { text: "联系人"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 4 }
                                         ListView { id: messageGroupList; Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 5; model: backend.publishMessageGroups
                                             onCountChanged: publishPage.ensureMessageGroupSelection()
                                             delegate: Rectangle { width: messageGroupList.width; height: 72; radius: 8
@@ -3618,19 +3660,19 @@ ApplicationWindow {
                                                     Loader { Layout.preferredWidth: 26; Layout.preferredHeight: 26; sourceComponent: platformIconComponent; onLoaded: item.platform = modelData.platform }
                                                     ColumnLayout { Layout.fillWidth: true; spacing: 2
                                                         RowLayout { Layout.fillWidth: true
-                                                            Text { text: modelData.nickname || "匿名用户"; color: window.ink; font.pixelSize: 11; font.weight: Font.Medium; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                            Text { text: modelData.nickname || "匿名用户"; color: window.ink; font.pixelSize: 12; font.weight: Font.Medium; Layout.fillWidth: true; elide: Text.ElideRight }
                                                             Rectangle { visible: Number(modelData.unread_count || 0) > 0; Layout.preferredWidth: 20; Layout.preferredHeight: 18; radius: 9; color: window.amber
-                                                                Text { anchors.centerIn: parent; text: modelData.unread_count; color: "#071224"; font.pixelSize: 9; font.weight: Font.Bold }
+                                                                Text { anchors.centerIn: parent; text: modelData.unread_count; color: "#071224"; font.pixelSize: 12; font.weight: Font.Bold }
                                                             }
                                                         }
-                                                        Text { text: "ID：" + (modelData.display_id || "未获取ID"); color: window.muted; font.pixelSize: 9; elide: Text.ElideMiddle; wrapMode: Text.NoWrap; clip: true; Layout.fillWidth: true; Layout.minimumWidth: 0 }
-                                                        Text { text: (modelData.platform_label || "平台") + " · " + (modelData.message_count || 0) + " 条 · " + (modelData.latest_preview || "暂无消息"); color: window.blue; font.pixelSize: 9; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                        Text { text: "ID：" + (modelData.display_id || "未获取ID"); color: window.muted; font.pixelSize: 12; elide: Text.ElideMiddle; wrapMode: Text.NoWrap; clip: true; Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                                        Text { text: (modelData.platform_label || "平台") + " · " + (modelData.message_count || 0) + " 条 · " + (modelData.latest_preview || "暂无消息"); color: window.blue; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                                                     }
                                                 }
                                                 MouseArea { id: groupMouse; anchors.fill: parent; hoverEnabled: true; onClicked: publishPage.selectMessageGroup(modelData.key) }
                                             }
                                         }
-                                        Text { visible: messageGroupList.count === 0; text: "暂无会话"; color: window.muted; font.pixelSize: 10; Layout.alignment: Qt.AlignHCenter }
+                                        Text { visible: messageGroupList.count === 0; text: "暂无会话"; color: window.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignHCenter }
                                     }
                                 }
                                 Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; radius: 8; color: "#101d31"; border.color: window.line
@@ -3638,38 +3680,38 @@ ApplicationWindow {
                                         RowLayout { Layout.fillWidth: true
                                             ColumnLayout { Layout.fillWidth: true; spacing: 2
                                                 Text { text: publishPage.selectedMessageGroup().nickname || "请选择左侧会话"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
-                                                Text { text: publishPage.selectedMessageGroup().user_id ? "ID：" + publishPage.selectedMessageGroup().user_id : "ID：未获取ID"; color: window.muted; font.pixelSize: 10; elide: Text.ElideMiddle; wrapMode: Text.NoWrap; clip: true; Layout.fillWidth: true; Layout.minimumWidth: 0 }
+                                                Text { text: publishPage.selectedMessageGroup().user_id ? "ID：" + publishPage.selectedMessageGroup().user_id : "ID：未获取ID"; color: window.muted; font.pixelSize: 12; elide: Text.ElideMiddle; wrapMode: Text.NoWrap; clip: true; Layout.fillWidth: true; Layout.minimumWidth: 0 }
                                             }
-                                            Text { text: (publishPage.selectedMessageGroup().platform_label || "") + (publishPage.selectedMessageGroup().account_name ? " · " + publishPage.selectedMessageGroup().account_name : ""); color: window.blue; font.pixelSize: 10; elide: Text.ElideRight }
+                                            Text { text: (publishPage.selectedMessageGroup().platform_label || "") + (publishPage.selectedMessageGroup().account_name ? " · " + publishPage.selectedMessageGroup().account_name : ""); color: window.blue; font.pixelSize: 12; elide: Text.ElideRight }
                                         }
                                         Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
                                         ListView { id: messageDetailList; Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 7; model: publishPage.selectedMessageGroupRows()
                                             delegate: Rectangle { width: messageDetailList.width; height: modelData.can_reply ? 166 : 132; radius: 8; color: modelData.is_read ? "#132238" : "#1c304d"; border.color: modelData.is_read ? window.line : window.blue
                                                 ColumnLayout { anchors.fill: parent; anchors.margins: 10; spacing: 5
                                                     RowLayout { Layout.fillWidth: true
-                                                        Text { text: (modelData.message_type_label || "其他") + (modelData.action ? " · " + modelData.action : ""); color: window.blue; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
-                                                        Text { text: modelData.event_time || modelData.created_at || ""; color: window.muted; font.pixelSize: 9 }
+                                                        Text { text: (modelData.message_type_label || "其他") + (modelData.action ? " · " + modelData.action : ""); color: window.blue; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                                        Text { text: modelData.event_time || modelData.created_at || ""; color: window.muted; font.pixelSize: 12 }
                                                         Rectangle { radius: 5; color: modelData.can_reply ? "#173f4c" : "#27354a"; Layout.preferredWidth: 48; Layout.preferredHeight: 20
-                                                            Text { anchors.centerIn: parent; text: modelData.can_reply ? "可回复" : "仅通知"; color: modelData.can_reply ? window.green : window.muted; font.pixelSize: 9 }
+                                                            Text { anchors.centerIn: parent; text: modelData.can_reply ? "可回复" : "仅通知"; color: modelData.can_reply ? window.green : window.muted; font.pixelSize: 12 }
                                                         }
                                                     }
-                                                    Text { text: modelData.content || "暂无文字内容（可能是点赞、关注或系统通知）"; color: "#c8d7ea"; font.pixelSize: 11; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true; Layout.fillHeight: true }
-                                                    Text { visible: Boolean(modelData.quote_content || modelData.source_title); text: (modelData.quote_content ? "原文：" + modelData.quote_content : "来源：" + modelData.source_title); color: window.muted; font.pixelSize: 9; maximumLineCount: 1; elide: Text.ElideRight; Layout.fillWidth: true }
+                                                    Text { text: modelData.content || "暂无文字内容（可能是点赞、关注或系统通知）"; color: "#c8d7ea"; font.pixelSize: 12; wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight; Layout.fillWidth: true; Layout.fillHeight: true }
+                                                    Text { visible: Boolean(modelData.quote_content || modelData.source_title); text: (modelData.quote_content ? "原文：" + modelData.quote_content : "来源：" + modelData.source_title); color: window.muted; font.pixelSize: 12; maximumLineCount: 1; elide: Text.ElideRight; Layout.fillWidth: true }
                                                     RowLayout { Layout.fillWidth: true
                                                         Item { Layout.fillWidth: true }
                                                         AppButton { visible: modelData.can_reply; enabled: publishPage.messageActionPendingId === 0; text: publishPage.messageActionPendingId === Number(modelData.id) ? "打开中…" : "打开浏览器回复"; Layout.preferredWidth: 112; Layout.preferredHeight: 26; onClicked: { publishPage.messageActionPendingId = Number(modelData.id || 0); publishPage.messageActionNotice = "正在打开对应浏览器…"; backend.openPublishedMessageReply(Number(modelData.id)) }
-                                                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                             background: Rectangle { radius: 7; color: parent.hovered ? "#203b61" : "transparent"; border.color: parent.hovered ? window.blue : window.line }
                                                         }
                                                         AppButton { text: modelData.is_read ? "已读" : "标记已读"; Layout.preferredWidth: 76; Layout.preferredHeight: 26; onClicked: backend.markPublishedMessage(Number(modelData.id), true)
-                                                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                                             background: Rectangle { radius: 7; color: "transparent"; border.color: parent.hovered ? window.blue : window.line }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                        Text { visible: messageDetailList.count === 0; text: messageGroupList.count === 0 ? "暂无已同步消息，点击右上角“同步消息”读取四个平台的全部消息" : "该会话暂无消息"; color: window.muted; font.pixelSize: 11; Layout.alignment: Qt.AlignHCenter }
+                                        Text { visible: messageDetailList.count === 0; text: messageGroupList.count === 0 ? "暂无已同步消息，点击右上角“同步消息”读取四个平台的全部消息" : "该会话暂无消息"; color: window.muted; font.pixelSize: 12; Layout.alignment: Qt.AlignHCenter }
                                     }
                                 }
                             }
@@ -3679,14 +3721,14 @@ ApplicationWindow {
 
                 ColumnLayout {
                     visible: publishPage.publishTab === "settings"
-                    anchors.fill: parent; anchors.margins: 22; spacing: 12
+                    anchors.fill: parent; anchors.margins: window.pagePadding; spacing: 12
                     RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 48
                         ColumnLayout { Layout.fillWidth: true; spacing: 2
-                            Text { text: "发布设置"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
+                            Text { text: "发布设置"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                             Text { text: "连接、API 和操作日志沿用采集工作台的统一设置"; color: window.muted; font.pixelSize: 12 }
                         }
-                        AppButton { text: "刷新状态"; Layout.preferredWidth: 88; Layout.preferredHeight: 32; onClicked: backend.refreshDiagnostics()
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                        AppButton { text: "刷新状态"; Layout.preferredWidth: 88; Layout.preferredHeight: window.controlHeight; onClicked: backend.refreshDiagnostics()
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                         }
                     }
@@ -3697,59 +3739,59 @@ ApplicationWindow {
                                 Repeater { model: [{label: "BitBrowser", value: backend.diagnosticBitBrowser.configured ? "已配置" : "未配置", ok: backend.diagnosticBitBrowser.configured}, {label: "智能 API", value: backend.diagnosticLlmApi.configured ? "已配置" : "未配置", ok: backend.diagnosticLlmApi.configured}, {label: "后台日志", value: backend.connectionText, ok: backend.connectionText === "后台服务已连接"}]
                                     delegate: Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 54; radius: 8; color: "#111d30"; border.color: window.line
                                         RowLayout { anchors.fill: parent; anchors.margins: 12
-                                            Text { text: modelData.label; color: window.muted; Layout.fillWidth: true; font.pixelSize: 11 }
-                                            Text { text: modelData.value; color: modelData.ok ? window.green : window.amber; font.pixelSize: 11 }
+                                            Text { text: modelData.label; color: window.muted; Layout.fillWidth: true; font.pixelSize: 12 }
+                                            Text { text: modelData.value; color: modelData.ok ? window.green : window.amber; font.pixelSize: 12 }
                                         }
                                     }
                                 }
                                 Item { Layout.fillHeight: true }
-                                Text { text: "发布工作区默认只创建草稿和队列，不会绕过现有的真实发送确认。"; color: window.muted; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                Text { text: "发布工作区默认只创建草稿和队列，不会绕过现有的真实发送确认。"; color: window.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                             }
                         }
                         Rectangle { Layout.preferredWidth: 360; Layout.fillHeight: true; radius: 10; color: window.panel; border.color: window.line
                             ColumnLayout { anchors.fill: parent; anchors.margins: 16; spacing: 9
                                 Text { text: "智能回复与评论分析 API"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
-                                Text { text: "配置后用于批量意向分析和后续智能内容生成"; color: window.muted; font.pixelSize: 10; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                Text { text: "配置后用于批量意向分析和后续智能内容生成"; color: window.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                 RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 30; spacing: 7
-                                    Text { text: "服务商"; color: window.muted; Layout.preferredWidth: 52; font.pixelSize: 10 }
+                                    Text { text: "服务商"; color: window.muted; Layout.preferredWidth: 52; font.pixelSize: 12 }
                                     TextField { id: publishApiProviderField; Layout.fillWidth: true; text: backend.diagnosticLlmApi.provider || ""; color: window.ink; palette.placeholderText: window.muted; placeholderText: "例如：DeepSeek"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                                 }
                                 RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 30; spacing: 7
-                                    Text { text: "API 地址"; color: window.muted; Layout.preferredWidth: 52; font.pixelSize: 10 }
+                                    Text { text: "API 地址"; color: window.muted; Layout.preferredWidth: 52; font.pixelSize: 12 }
                                     TextField { id: publishApiUrlField; Layout.fillWidth: true; text: backend.diagnosticLlmApi.base_url || ""; color: window.ink; palette.placeholderText: window.muted; placeholderText: "https://.../v1"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                                 }
                                 RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 30; spacing: 7
-                                    Text { text: "模型"; color: window.muted; Layout.preferredWidth: 52; font.pixelSize: 10 }
+                                    Text { text: "模型"; color: window.muted; Layout.preferredWidth: 52; font.pixelSize: 12 }
                                     TextField { id: publishApiModelField; Layout.fillWidth: true; text: backend.diagnosticLlmApi.model || ""; color: window.ink; palette.placeholderText: window.muted; placeholderText: "模型名称"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                                 }
                                 RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 30; spacing: 7
-                                    Text { text: "API Key"; color: window.muted; Layout.preferredWidth: 52; font.pixelSize: 10 }
+                                    Text { text: "API Key"; color: window.muted; Layout.preferredWidth: 52; font.pixelSize: 12 }
                                     TextField { id: publishApiKeyField; Layout.fillWidth: true; echoMode: TextInput.Password; color: window.ink; palette.placeholderText: window.muted; placeholderText: "留空表示保留已保存密钥"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                                 }
                                 RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 30; spacing: 8
                                     AppCheckBox { id: publishApiEnabledCheck; text: "启用智能 API"; checked: Boolean(backend.diagnosticLlmApi.enabled); Layout.fillWidth: true }
                                     AppButton { text: "保存 API"; Layout.preferredWidth: 78; Layout.preferredHeight: 28; onClicked: backend.saveSettings(String(backend.diagnosticBitBrowser.base_url || "http://127.0.0.1:54345"), Number(backend.diagnosticBitBrowser.timeout || 20), publishApiProviderField.text, publishApiUrlField.text, publishApiKeyField.text, publishApiModelField.text, publishApiEnabledCheck.checked)
-                                        contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                        contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                         background: Rectangle { radius: 7; color: window.blue; border.color: window.line }
                                     }
                                 }
-                                Text { text: backend.diagnosticLlmApi.configured ? "当前 API 已配置，可进行连通性测试" : "请填写 API 地址和密钥后保存"; color: backend.diagnosticLlmApi.configured ? window.green : window.amber; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
+                                Text { text: backend.diagnosticLlmApi.configured ? "当前 API 已配置，可进行连通性测试" : "请填写 API 地址和密钥后保存"; color: backend.diagnosticLlmApi.configured ? window.green : window.amber; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                                 Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
                                 Text { text: "链路测试"; color: window.ink; font.pixelSize: 13; font.weight: Font.Medium }
-                                AppButton { text: "检测 BitBrowser"; Layout.fillWidth: true; Layout.preferredHeight: 32; onClicked: backend.inspectBitBrowser()
-                                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                AppButton { text: "检测 BitBrowser"; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight; onClicked: backend.inspectBitBrowser()
+                                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                 }
-                                AppButton { text: "测试智能 API"; Layout.fillWidth: true; Layout.preferredHeight: 32; onClicked: backend.testLlmApi()
-                                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                AppButton { text: "测试智能 API"; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight; onClicked: backend.testLlmApi()
+                                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                 }
-                                AppButton { text: "运行平台链路测试"; Layout.fillWidth: true; Layout.preferredHeight: 32; onClicked: backend.runPlatformHealth()
-                                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                AppButton { text: "运行平台链路测试"; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight; onClicked: backend.runPlatformHealth()
+                                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                 }
-                                AppButton { text: "导出操作日志"; Layout.fillWidth: true; Layout.preferredHeight: 32; onClicked: backend.exportOperationLog()
-                                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                AppButton { text: "导出操作日志"; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight; onClicked: backend.exportOperationLog()
+                                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                 }
                                 Item { Layout.fillHeight: true }
@@ -3761,7 +3803,7 @@ ApplicationWindow {
                 ColumnLayout {
                     visible: publishPage.publishTab === "publish"
                     anchors.fill: parent
-                    anchors.margins: 22
+                    anchors.margins: window.pagePadding
                     spacing: 10
                     RowLayout {
                         Layout.fillWidth: true
@@ -3769,39 +3811,39 @@ ApplicationWindow {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 2
-                            Text { text: "发布中心"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
+                            Text { text: "发布中心"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                             Text { text: "统一管理四个平台的内容版本、素材、审核和发布队列"; color: window.muted; font.pixelSize: 12 }
                         }
                         Item { Layout.fillWidth: true }
                         AppButton {
                             text: publishPage.realPublishEnabled ? "真实发布：已开启" : "开启真实发布"
-                            Layout.preferredWidth: 132; Layout.preferredHeight: 34
+                            Layout.preferredWidth: 132; Layout.preferredHeight: window.controlHeight
                             onClicked: {
                                 if (publishPage.realPublishEnabled) publishPage.realPublishEnabled = false
                                 else realPublishEnableDialog.open()
                             }
-                            contentItem: Text { text: parent.text; color: publishPage.realPublishEnabled ? "#ff9696" : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: publishPage.realPublishEnabled ? "#ff9696" : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 17; color: publishPage.realPublishEnabled ? "#3a1f2b" : "#101b2d"; border.color: publishPage.realPublishEnabled ? "#8b4d5a" : (parent.hovered ? window.blue : window.line) }
                         }
                         AppButton {
                             text: "刷新"
-                            Layout.preferredWidth: 88; Layout.preferredHeight: 34
+                            Layout.preferredWidth: 88; Layout.preferredHeight: window.controlHeight
                             onClicked: publishPage.requestRefresh()
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                         }
                         AppButton {
                             text: "从内容生成导入"
-                            Layout.preferredWidth: 126; Layout.preferredHeight: 34
+                            Layout.preferredWidth: 126; Layout.preferredHeight: window.controlHeight
                             onClicked: publishPage.selectTab("generation")
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                         }
                         AppButton {
                             text: "＋ 新建内容"
-                            Layout.preferredWidth: 138; Layout.preferredHeight: 34
+                            Layout.preferredWidth: 138; Layout.preferredHeight: window.controlHeight
                             onClicked: publishDraftDialog.open()
-                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: parent.hovered ? "#8bbaff" : window.blue }
                         }
                     }
@@ -3813,7 +3855,7 @@ ApplicationWindow {
                             anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                             ComboBox {
                                 id: publishStatusChooser
-                                Layout.preferredWidth: 148; Layout.preferredHeight: 32
+                                Layout.preferredWidth: 148; Layout.preferredHeight: window.controlHeight
                                 model: [{value: "all", label: "全部状态"}].concat(backend.publishStatusOptions)
                                 textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                 onActivated: { publishPage.activeStatus = String(currentValue || "all"); publishPage.requestRefresh() }
@@ -3822,7 +3864,7 @@ ApplicationWindow {
                             }
                             ComboBox {
                                 id: publishPlatformChooser
-                                Layout.preferredWidth: 148; Layout.preferredHeight: 32
+                                Layout.preferredWidth: 148; Layout.preferredHeight: window.controlHeight
                                 model: publishPage.platformFilterOptions
                                 textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                 onActivated: { publishPage.activePlatform = String(currentValue || ""); publishPage.requestRefresh() }
@@ -3831,7 +3873,7 @@ ApplicationWindow {
                             }
                             TextField {
                                 id: publishSearchField
-                                Layout.preferredWidth: 300; Layout.preferredHeight: 32
+                                Layout.preferredWidth: 300; Layout.preferredHeight: window.controlHeight
                                 leftPadding: 32; placeholderText: "搜索标题、内容或来源"
                                 color: window.ink; placeholderTextColor: "#7187a3"
                                 onAccepted: { publishPage.searchText = text; publishPage.requestRefresh() }
@@ -3839,13 +3881,13 @@ ApplicationWindow {
                                 Text { anchors.left: parent.left; anchors.leftMargin: 11; anchors.verticalCenter: parent.verticalCenter; text: "⌕"; color: window.muted; font.pixelSize: 17 }
                             }
                             AppButton {
-                                text: "搜索"; Layout.preferredWidth: 64; Layout.preferredHeight: 32
+                                text: "搜索"; Layout.preferredWidth: 64; Layout.preferredHeight: window.controlHeight
                                 onClicked: { publishPage.searchText = publishSearchField.text; publishPage.requestRefresh() }
-                                contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 background: Rectangle { radius: 7; color: "transparent"; border.color: parent.hovered ? window.blue : window.line }
                             }
                             Item { Layout.fillWidth: true }
-                            Text { text: backend.publishTotal + " 条内容"; color: window.muted; font.pixelSize: 11 }
+                            Text { text: backend.publishTotal + " 条内容"; color: window.muted; font.pixelSize: 12 }
                         }
                     }
                     RowLayout {
@@ -3862,7 +3904,7 @@ ApplicationWindow {
                                 RowLayout { Layout.fillWidth: true
                                     Text { text: "内容列表"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
                                     Item { Layout.fillWidth: true }
-                                    Text { text: "草稿箱"; color: window.muted; font.pixelSize: 10 }
+                                    Text { text: "草稿箱"; color: window.muted; font.pixelSize: 12 }
                                 }
                                 ListView {
                                     id: publishDraftList
@@ -3893,21 +3935,21 @@ ApplicationWindow {
                                                 }
                                                 ColumnLayout { Layout.fillWidth: true; spacing: 2
                                                     Text { text: modelData.title || "未命名内容"; color: window.ink; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; font.weight: Font.Medium }
-                                                    Text { text: "来源：线索中心 · 内容发布"; color: window.muted; font.pixelSize: 9; elide: Text.ElideRight }
+                                                    Text { text: "来源：线索中心 · 内容发布"; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight }
                                                 }
                                                 Text { text: "⋮"; color: window.muted; font.pixelSize: 18 }
                                             }
                                             RowLayout { Layout.fillWidth: true; spacing: 7
-                                                Text { text: rowPlatformLabels.join(" · ") || "未选择平台"; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 9 }
+                                                Text { text: rowPlatformLabels.join(" · ") || "未选择平台"; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12 }
                                                 Rectangle { Layout.preferredWidth: 52; Layout.preferredHeight: 21; radius: 6; color: "#332d1d"; border.color: publishPage.statusColor(modelData.status)
-                                                    Text { anchors.centerIn: parent; text: modelData.status_label || "草稿"; color: publishPage.statusColor(modelData.status); font.pixelSize: 9 }
+                                                    Text { anchors.centerIn: parent; text: modelData.status_label || "草稿"; color: publishPage.statusColor(modelData.status); font.pixelSize: 12 }
                                                 }
                                             }
-                                            Text { text: "素材 " + (modelData.asset_count || 0) + " 个 · 更新于 " + publishPage.displayTime(modelData.updated_at); color: "#7187a3"; font.pixelSize: 9 }
+                                            Text { text: "素材 " + (modelData.asset_count || 0) + " 个 · 更新于 " + publishPage.displayTime(modelData.updated_at); color: "#7187a3"; font.pixelSize: 12 }
                                         }
                                     }
                                 }
-                                Text { visible: backend.publishDraftRows.length === 0; text: "暂无内容，点击右上角新建内容"; color: window.muted; Layout.alignment: Qt.AlignHCenter; font.pixelSize: 11 }
+                                Text { visible: backend.publishDraftRows.length === 0; text: "暂无内容，点击右上角新建内容"; color: window.muted; Layout.alignment: Qt.AlignHCenter; font.pixelSize: 12 }
                             }
                         }
                         Rectangle {
@@ -3918,7 +3960,7 @@ ApplicationWindow {
                                 RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 28
                                     Text { text: publishPage.selectedDraftId > 0 ? "平台版本编辑" : "选择一条内容"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
                                     Item { Layout.fillWidth: true }
-                                    Text { visible: publishPage.selectedDraftId > 0; text: "版本 v" + ((publishPage.selectedRow() || {}).version || 1); color: window.muted; font.pixelSize: 10 }
+                                    Text { visible: publishPage.selectedDraftId > 0; text: "版本 v" + ((publishPage.selectedRow() || {}).version || 1); color: window.muted; font.pixelSize: 12 }
                                 }
                                 RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 38; spacing: 4
                                     Repeater {
@@ -3935,7 +3977,7 @@ ApplicationWindow {
                                             }
                                             contentItem: RowLayout { spacing: 5
                                                 Loader { Layout.preferredWidth: 20; Layout.preferredHeight: 20; sourceComponent: userPlatformIconComponent; onLoaded: item.platform = modelData.value }
-                                                Text { text: modelData.label; color: publishPage.selectedPlatform === modelData.value ? window.ink : window.muted; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                                Text { text: modelData.label; color: publishPage.selectedPlatform === modelData.value ? window.ink : window.muted; Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                             }
                                             background: Rectangle { color: "transparent"; border.color: "transparent"
                                                 Rectangle { anchors.bottom: parent.bottom; anchors.horizontalCenter: parent.horizontalCenter; width: parent.width - 10; height: 2; color: publishPage.selectedPlatform === modelData.value ? window.blue : "transparent" }
@@ -3949,25 +3991,25 @@ ApplicationWindow {
                                     visible: publishPage.selectedDraftId > 0
                                     Layout.fillWidth: true; Layout.fillHeight: true; spacing: 9
                                     RowLayout { Layout.fillWidth: true
-                                        Text { text: "标题"; color: window.muted; Layout.preferredWidth: 56; font.pixelSize: 11 }
-                                        TextField { id: publishEditorTitle; Layout.fillWidth: true; Layout.preferredHeight: 34; text: publishPage.editorTitle; onTextChanged: publishPage.editorTitle = text; color: window.ink; leftPadding: 10; background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line } }
-                                        Text { text: String(publishPage.editorTitle || "").length + "/60"; color: window.muted; font.pixelSize: 9 }
+                                        Text { text: "标题"; color: window.muted; Layout.preferredWidth: 56; font.pixelSize: 12 }
+                                        TextField { id: publishEditorTitle; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight; text: publishPage.editorTitle; onTextChanged: publishPage.editorTitle = text; color: window.ink; leftPadding: 10; background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line } }
+                                        Text { text: String(publishPage.editorTitle || "").length + "/60"; color: window.muted; font.pixelSize: 12 }
                                     }
                                     RowLayout { Layout.fillWidth: true
-                                        Text { text: "正文内容"; color: window.muted; font.pixelSize: 11; Layout.fillWidth: true }
-                                        Text { text: String(publishPage.editorBody || "").length + "/1000"; color: window.muted; font.pixelSize: 9 }
+                                        Text { text: "正文内容"; color: window.muted; font.pixelSize: 12; Layout.fillWidth: true }
+                                        Text { text: String(publishPage.editorBody || "").length + "/1000"; color: window.muted; font.pixelSize: 12 }
                                     }
                                     TextArea { id: publishEditorBody; Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 130; text: publishPage.editorBody; onTextChanged: publishPage.editorBody = text; color: window.ink; wrapMode: TextArea.Wrap; selectByMouse: true; placeholderText: "请输入完整发布内容"; placeholderTextColor: "#7187a3"; leftPadding: 10; topPadding: 10; background: Rectangle { radius: 7; color: "#111d30"; border.color: parent.activeFocus ? window.blue : window.line } }
                                     RowLayout { Layout.fillWidth: true
-                                        Text { text: "话题标签"; color: window.muted; Layout.preferredWidth: 56; font.pixelSize: 11 }
-                                        TextField { id: publishEditorTopics; Layout.fillWidth: true; Layout.preferredHeight: 34; text: publishPage.editorTopics; onTextChanged: publishPage.editorTopics = text; color: window.ink; placeholderText: "多个话题用逗号分隔"; placeholderTextColor: "#7187a3"; leftPadding: 10; background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line } }
+                                        Text { text: "话题标签"; color: window.muted; Layout.preferredWidth: 56; font.pixelSize: 12 }
+                                        TextField { id: publishEditorTopics; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight; text: publishPage.editorTopics; onTextChanged: publishPage.editorTopics = text; color: window.ink; placeholderText: "多个话题用逗号分隔"; placeholderTextColor: "#7187a3"; leftPadding: 10; background: Rectangle { radius: 7; color: window.panel2; border.color: parent.activeFocus ? window.blue : window.line } }
                                     }
                                     RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 92; spacing: 8
-                                        Text { text: "素材"; color: window.muted; Layout.preferredWidth: 56; Layout.alignment: Qt.AlignTop; topPadding: 7; font.pixelSize: 11 }
+                                        Text { text: "素材"; color: window.muted; Layout.preferredWidth: 56; Layout.alignment: Qt.AlignTop; topPadding: 7; font.pixelSize: 12 }
                                         Repeater {
                                             model: publishPage.assetRows().slice(0, 3)
                                             delegate: Rectangle { Layout.preferredWidth: 82; Layout.preferredHeight: 82; radius: 8; color: index % 2 === 0 ? "#203a48" : "#27344f"; border.color: window.line
-                                                Text { anchors.centerIn: parent; width: parent.width - 10; text: publishPage.assetName(modelData, index); color: "#d7e8f5"; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideMiddle; font.pixelSize: 9 }
+                                                Text { anchors.centerIn: parent; width: parent.width - 10; text: publishPage.assetName(modelData, index); color: "#d7e8f5"; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideMiddle; font.pixelSize: 12 }
                                                 AppButton {
                                                     anchors.right: parent.right; anchors.top: parent.top; anchors.rightMargin: 3; anchors.topMargin: 2
                                                     width: 22; height: 22; text: "×"
@@ -3979,7 +4021,7 @@ ApplicationWindow {
                                         }
                                         AppButton {
                                             text: "＋ 添加素材"; Layout.preferredWidth: 92; Layout.preferredHeight: 82
-                                            contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                            contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                             background: Rectangle {
                                                 radius: 8; color: "transparent"; border.color: parent.hovered ? window.blue : window.line; border.width: 1
                                                 Text { anchors.horizontalCenter: parent.horizontalCenter; anchors.top: parent.top; anchors.topMargin: 13; text: "+"; color: window.blue; font.pixelSize: 21 }
@@ -3991,33 +4033,33 @@ ApplicationWindow {
                                     RowLayout { Layout.fillWidth: true
                                         Item { Layout.fillWidth: true }
                                         AppButton {
-                                            text: "保存平台版本"; Layout.preferredWidth: 116; Layout.preferredHeight: 34
+                                            text: "保存平台版本"; Layout.preferredWidth: 116; Layout.preferredHeight: window.controlHeight
                                             onClicked: backend.updatePublishVariant(publishPage.selectedDraftId, publishPage.selectedPlatform, publishPage.editorTitle, publishPage.editorBody, publishPage.editorTopics, "text")
-                                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                             background: Rectangle { radius: 7; color: "transparent"; border.color: parent.hovered ? window.blue : window.line }
                                         }
                                         AppButton {
-                                            text: "提交审核"; Layout.preferredWidth: 92; Layout.preferredHeight: 34; visible: (publishPage.selectedRow() || {}).status === "draft"
+                                            text: "提交审核"; Layout.preferredWidth: 92; Layout.preferredHeight: window.controlHeight; visible: (publishPage.selectedRow() || {}).status === "draft"
                                             onClicked: backend.publishDraftAction(publishPage.selectedDraftId, "submit_review")
-                                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                             background: Rectangle { radius: 7; color: parent.hovered ? "#8bbaff" : window.blue }
                                         }
                                         AppButton {
-                                            text: "批准"; Layout.preferredWidth: 72; Layout.preferredHeight: 34; visible: (publishPage.selectedRow() || {}).status === "review"
+                                            text: "批准"; Layout.preferredWidth: 72; Layout.preferredHeight: window.controlHeight; visible: (publishPage.selectedRow() || {}).status === "review"
                                             onClicked: backend.publishDraftAction(publishPage.selectedDraftId, "approve")
-                                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                             background: Rectangle { radius: 7; color: parent.hovered ? "#64e3b7" : window.green }
                                         }
                                         AppButton {
-                                            text: "进入待发布"; Layout.preferredWidth: 102; Layout.preferredHeight: 34; visible: (publishPage.selectedRow() || {}).status === "approved"
+                                            text: "进入待发布"; Layout.preferredWidth: 102; Layout.preferredHeight: window.controlHeight; visible: (publishPage.selectedRow() || {}).status === "approved"
                                             onClicked: backend.publishDraftAction(publishPage.selectedDraftId, "queue")
-                                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                             background: Rectangle { radius: 7; color: parent.hovered ? "#8bbaff" : window.blue }
                                         }
                                         AppButton {
-                                            text: "删除"; Layout.preferredWidth: 72; Layout.preferredHeight: 34; visible: publishPage.selectedDraftId > 0 && (publishPage.selectedRow() || {}).status !== "published"
+                                            text: "删除"; Layout.preferredWidth: 72; Layout.preferredHeight: window.controlHeight; visible: publishPage.selectedDraftId > 0 && (publishPage.selectedRow() || {}).status !== "published"
                                             onClicked: backend.deletePublishDraft(publishPage.selectedDraftId)
-                                            contentItem: Text { text: parent.text; color: "#ff9b9b"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                            contentItem: Text { text: parent.text; color: "#ff9b9b"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                             background: Rectangle { radius: 7; color: "transparent"; border.color: parent.hovered ? "#ee7182" : window.line }
                                         }
                                     }
@@ -4043,7 +4085,7 @@ ApplicationWindow {
                                 RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 26
                                     Text { text: "平台预览"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
                                     Item { Layout.fillWidth: true }
-                                    Text { text: publishPage.platformLabel(publishPage.selectedPlatform); color: window.blue; font.pixelSize: 10 }
+                                    Text { text: publishPage.platformLabel(publishPage.selectedPlatform); color: window.blue; font.pixelSize: 12 }
                                 }
                                 Rectangle {
                                     Layout.fillWidth: true; Layout.preferredHeight: 276; radius: 10; color: "#101b2d"; border.color: window.line
@@ -4057,13 +4099,13 @@ ApplicationWindow {
                                                 onPlatformValueChanged: if (item) item.platform = platformValue
                                             }
                                             ColumnLayout { Layout.fillWidth: true; spacing: 1
-                                                Text { text: publishPage.selectedAccountName(); color: window.ink; font.pixelSize: 10; font.weight: Font.Medium }
-                                                Text { text: "刚刚"; color: window.muted; font.pixelSize: 9 }
+                                                Text { text: publishPage.selectedAccountName(); color: window.ink; font.pixelSize: 12; font.weight: Font.Medium }
+                                                Text { text: "刚刚"; color: window.muted; font.pixelSize: 12 }
                                             }
                                             Text { text: "•••"; color: window.muted; font.pixelSize: 12 }
                                         }
                                         Text { text: publishPage.editorTitle || "标题预览"; color: window.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 13; font.weight: Font.Medium }
-                                        Text { text: publishPage.editorBody || "预览内容将在选择内容后显示"; color: "#c8d7ea"; wrapMode: Text.WordWrap; Layout.fillWidth: true; Layout.maximumHeight: 44; elide: Text.ElideRight; font.pixelSize: 10; verticalAlignment: Text.AlignTop }
+                                        Text { text: publishPage.editorBody || "预览内容将在选择内容后显示"; color: "#c8d7ea"; wrapMode: Text.WordWrap; Layout.fillWidth: true; Layout.maximumHeight: 44; elide: Text.ElideRight; font.pixelSize: 12; verticalAlignment: Text.AlignTop }
                                         Rectangle {
                                             id: previewMediaFrame
                                             Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 90
@@ -4101,25 +4143,25 @@ ApplicationWindow {
                                                 anchors.centerIn: parent; spacing: 4
                                                 visible: !previewMediaFrame.hasMedia
                                                 Text { text: "▣"; color: "#9fcbd0"; font.pixelSize: 28; Layout.alignment: Qt.AlignHCenter }
-                                                Text { text: "暂无素材"; color: "#bad4dc"; font.pixelSize: 10 }
+                                                Text { text: "暂无素材"; color: "#bad4dc"; font.pixelSize: 12 }
                                             }
                                             Text {
                                                 anchors.centerIn: parent; visible: previewImage.visible && previewImage.status === Image.Error
-                                                text: "图片无法预览"; color: "#bad4dc"; font.pixelSize: 10
+                                                text: "图片无法预览"; color: "#bad4dc"; font.pixelSize: 12
                                             }
                                             Text {
                                                 anchors.centerIn: parent; visible: previewVideoOutput.visible && previewVideoPlayer.error !== MediaPlayer.NoError
-                                                text: "视频无法预览"; color: "#bad4dc"; font.pixelSize: 10
+                                                text: "视频无法预览"; color: "#bad4dc"; font.pixelSize: 12
                                             }
                                         }
-                                        Text { text: "♡  点赞       ○  评论       ↗  分享       ☆  收藏"; color: window.muted; font.pixelSize: 9 }
+                                        Text { text: "♡  点赞       ○  评论       ↗  分享       ☆  收藏"; color: window.muted; font.pixelSize: 12 }
                                     }
                                 }
                                 Text { text: "发布设置"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium; Layout.topMargin: 2 }
                                 RowLayout { Layout.fillWidth: true
-                                    Text { text: "选择账号"; color: window.muted; Layout.preferredWidth: 58; font.pixelSize: 10 }
+                                    Text { text: "选择账号"; color: window.muted; Layout.preferredWidth: 58; font.pixelSize: 12 }
                                     ComboBox {
-                                        id: publishAccountChooser; Layout.fillWidth: true; Layout.preferredHeight: 32
+                                        id: publishAccountChooser; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight
                                         model: publishPage.accountOptions(); textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                         onActivated: {
                                             publishPage.selectedAccountId = String(currentValue || "0")
@@ -4131,10 +4173,10 @@ ApplicationWindow {
                                     }
                                 }
                                 RowLayout { Layout.fillWidth: true
-                                    Text { text: "发布时间"; color: window.muted; Layout.preferredWidth: 58; font.pixelSize: 10 }
+                                    Text { text: "发布时间"; color: window.muted; Layout.preferredWidth: 58; font.pixelSize: 12 }
                                     ComboBox {
                                         id: publishTimeModeChooser
-                                        Layout.fillWidth: true; Layout.preferredHeight: 32
+                                        Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight
                                         model: [{label: "立即发布", value: "now"}, {label: "定时发布", value: "scheduled"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                                         onActivated: {
                                             publishPage.publishTimeMode = String(currentValue || "now")
@@ -4146,9 +4188,9 @@ ApplicationWindow {
                                     }
                                 }
                                 RowLayout { Layout.fillWidth: true; visible: publishPage.publishTimeMode === "scheduled"
-                                    Text { text: "定时于"; color: window.muted; Layout.preferredWidth: 58; font.pixelSize: 10 }
+                                    Text { text: "定时于"; color: window.muted; Layout.preferredWidth: 58; font.pixelSize: 12 }
                                     AppButton {
-                                        Layout.fillWidth: true; Layout.preferredHeight: 32
+                                        Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight
                                         text: publishPage.scheduleDisplayText()
                                         onClicked: publishPage.openSchedulePicker()
                                         contentItem: Text {
@@ -4157,7 +4199,7 @@ ApplicationWindow {
                                             verticalAlignment: Text.AlignVCenter
                                             leftPadding: 10
                                             elide: Text.ElideRight
-                                            font.pixelSize: 10
+                                            font.pixelSize: 12
                                         }
                                         background: Rectangle {
                                             radius: 7
@@ -4166,13 +4208,13 @@ ApplicationWindow {
                                         }
                                     }
                                 }
-                                Text { visible: publishPage.publishTimeMode === "scheduled"; text: "北京时间 " + String(backend.beijingNowText || "").slice(0, 16) + " · 只能选择未来时间"; color: publishPage.scheduleSelectionIsFuture() ? window.muted : window.amber; font.pixelSize: 9; Layout.fillWidth: true }
+                                Text { visible: publishPage.publishTimeMode === "scheduled"; text: "北京时间 " + String(backend.beijingNowText || "").slice(0, 16) + " · 只能选择未来时间"; color: publishPage.scheduleSelectionIsFuture() ? window.muted : window.amber; font.pixelSize: 12; Layout.fillWidth: true }
                                 AppCheckBox { text: "仅保存草稿"; checked: publishPage.saveDraftOnly; onToggled: publishPage.saveDraftOnly = checked; Layout.preferredHeight: 24 }
                                 AppButton {
                                     text: publishPage.realPublishEnabled ? "保存定时发布" : "需开启真实发布"
                                     visible: publishPage.publishTimeMode === "scheduled"
                                     enabled: publishPage.selectedDraftId > 0 && publishPage.selectedAccountIsValid() && publishPage.scheduleSelectionIsFuture()
-                                    Layout.fillWidth: true; Layout.preferredHeight: 34
+                                    Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight
                                     onClicked: {
                                         if (!publishPage.realPublishEnabled) {
                                             publishPage.scheduleNotice = "请先开启真实发布，再保存定时发布；否则到点不会点击平台最终发布按钮"
@@ -4186,7 +4228,7 @@ ApplicationWindow {
                                             publishPage.editorTitle, publishPage.editorBody,
                                             publishPage.editorTopics, publishPage.realPublishEnabled)
                                     }
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? (publishPage.realPublishEnabled ? window.blue : window.amber) : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? (publishPage.realPublishEnabled ? window.blue : window.amber) : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 7; color: parent.enabled && parent.hovered ? "#1e3555" : "transparent"; border.color: parent.enabled && parent.hovered ? window.blue : window.line }
                                 }
                                 Text {
@@ -4199,10 +4241,10 @@ ApplicationWindow {
                                     Layout.preferredHeight: Math.max(22, implicitHeight)
                                     lineHeight: 13
                                     lineHeightMode: Text.FixedHeight
-                                    font.pixelSize: 9
+                                    font.pixelSize: 12
                                 }
                                 AppButton {
-                                    text: publishPage.realPublishEnabled ? "开始真实发布" : "填入浏览器预览"; Layout.fillWidth: true; Layout.preferredHeight: 34
+                                    text: publishPage.realPublishEnabled ? "开始真实发布" : "填入浏览器预览"; Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight
                                     enabled: publishPage.realPublishEnabled ? publishPage.realPublishAllowed() : (publishPage.selectedDraftId > 0 && publishPage.selectedAccountIsValid())
                                     onClicked: {
                                         if (publishPage.realPublishEnabled) realPublishConfirmDialog.open()
@@ -4212,7 +4254,7 @@ ApplicationWindow {
                                              publishPage.editorTitle, publishPage.editorBody,
                                              publishPage.editorTopics)
                                     }
-                                    contentItem: Text { text: parent.text; color: parent.enabled ? (publishPage.realPublishEnabled ? "#071224" : window.blue) : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    contentItem: Text { text: parent.text; color: parent.enabled ? (publishPage.realPublishEnabled ? "#071224" : window.blue) : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     background: Rectangle { radius: 7; color: parent.enabled && publishPage.realPublishEnabled ? (parent.hovered ? "#8bbaff" : window.blue) : "transparent"; border.color: parent.enabled && parent.hovered ? window.blue : window.line }
                                 }
                                 Text {
@@ -4222,14 +4264,14 @@ ApplicationWindow {
                                              : publishPage.realPublishDisabledReason())
                                           : "模拟模式：只填入浏览器，不点击最终发布按钮"
                                     color: publishPage.realPublishEnabled ? "#ffb0b0" : window.muted
-                                    font.pixelSize: 9
+                                    font.pixelSize: 12
                                     wrapMode: Text.WordWrap
                                     Layout.fillWidth: true
                                 }
                                 Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 44; radius: 7; color: "#2d291e"; border.color: "#8a6521"
                                     RowLayout { anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 7
                                         Text { text: "ⓘ"; color: window.amber; font.pixelSize: 15 }
-                                        Text { text: publishPage.realPublishEnabled ? "真实发布已开启：仅对已批准/待发布内容执行最终发布按钮" : "当前为模拟模式，不会真实发布"; color: publishPage.realPublishEnabled ? "#ffb0b0" : window.amber; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 10 }
+                                        Text { text: publishPage.realPublishEnabled ? "真实发布已开启：仅对已批准/待发布内容执行最终发布按钮" : "当前为模拟模式，不会真实发布"; color: publishPage.realPublishEnabled ? "#ffb0b0" : window.amber; Layout.fillWidth: true; wrapMode: Text.WordWrap; font.pixelSize: 12 }
                                     }
                                 }
                                 }
@@ -4242,9 +4284,9 @@ ApplicationWindow {
                         ColumnLayout { anchors.fill: parent; anchors.margins: 12; spacing: 8
                             RowLayout { Layout.fillWidth: true
                                 Text { text: "发布队列"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium }
-                                Text { text: "按平台版本独立排队"; color: window.muted; font.pixelSize: 10; Layout.leftMargin: 7 }
+                                Text { text: "按平台版本独立排队"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 7 }
                                 Item { Layout.fillWidth: true }
-                                Text { text: "最近更新：" + publishPage.displayTime((publishPage.selectedRow() || {}).updated_at); color: window.muted; font.pixelSize: 9 }
+                                Text { text: "最近更新：" + publishPage.displayTime((publishPage.selectedRow() || {}).updated_at); color: window.muted; font.pixelSize: 12 }
                             }
                             RowLayout { Layout.fillWidth: true; spacing: 8
                                 Repeater {
@@ -4257,7 +4299,7 @@ ApplicationWindow {
                                     delegate: Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 45; radius: 7; color: "#111d30"; border.color: window.line
                                         RowLayout { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 8
                                             ColumnLayout { Layout.fillWidth: true; spacing: 1
-                                                Text { text: modelData.label; color: window.muted; font.pixelSize: 9 }
+                                                Text { text: modelData.label; color: window.muted; font.pixelSize: 12 }
                                                 Text { text: modelData.key === "failed" ? publishPage.failedCount() : publishPage.statusCount(modelData.key); color: modelData.color; font.pixelSize: 17; font.weight: Font.DemiBold }
                                             }
                                             Text { text: modelData.icon; color: modelData.color; font.pixelSize: 21 }
@@ -4268,8 +4310,8 @@ ApplicationWindow {
                             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 28; radius: 6; color: "#111d30"; border.color: window.line
                                 RowLayout { anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 7
                                     Loader { Layout.preferredWidth: 20; Layout.preferredHeight: 20; sourceComponent: userPlatformIconComponent; onLoaded: item.platform = publishPage.selectedPlatform }
-                                    Text { text: publishPage.selectedDraftId > 0 ? ((publishPage.selectedRow() || {}).title || "未命名内容") + " · " + publishPage.platformLabel(publishPage.selectedPlatform) : "请选择内容查看队列状态"; color: window.ink; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 9 }
-                                    Text { text: publishPage.selectedDraftId > 0 ? ((publishPage.selectedRow() || {}).status_label || "草稿") : ""; color: publishPage.statusColor((publishPage.selectedRow() || {}).status); font.pixelSize: 9 }
+                                    Text { text: publishPage.selectedDraftId > 0 ? ((publishPage.selectedRow() || {}).title || "未命名内容") + " · " + publishPage.platformLabel(publishPage.selectedPlatform) : "请选择内容查看队列状态"; color: window.ink; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12 }
+                                    Text { text: publishPage.selectedDraftId > 0 ? ((publishPage.selectedRow() || {}).status_label || "草稿") : ""; color: publishPage.statusColor((publishPage.selectedRow() || {}).status); font.pixelSize: 12 }
                                     Text { text: "›"; color: window.muted; font.pixelSize: 16 }
                                 }
                             }
@@ -4283,17 +4325,17 @@ ApplicationWindow {
                 property var summary: JSON.parse(backend.snapshotJson || "{}")
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 30
+                    anchors.margins: window.pagePadding
                     spacing: 16
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "数据分析"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
+                        Text { text: "数据分析"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                         Text { text: "采集到回复的全链路数据概览"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 10 }
                         Item { Layout.fillWidth: true }
                         AppButton {
                             text: "刷新数据"
                             onClicked: backend.refresh()
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: window.panel2; border.color: window.line }
                         }
                     }
@@ -4318,7 +4360,7 @@ ApplicationWindow {
                                 border.color: window.line
                                 Column {
                                     anchors.left: parent.left; anchors.top: parent.top; anchors.leftMargin: 16; anchors.topMargin: 16; spacing: 9
-                                    Text { text: modelData.label; color: window.muted; font.pixelSize: 11 }
+                                    Text { text: modelData.label; color: window.muted; font.pixelSize: 12 }
                                     Text { text: analyticsPage.summary[modelData.key] || 0; color: modelData.color; font.pixelSize: 25; font.weight: Font.DemiBold }
                                 }
                             }
@@ -4339,7 +4381,7 @@ ApplicationWindow {
                                 anchors.margins: 18
                                 spacing: 13
                                 Text { text: "转化漏斗"; color: window.ink; font.pixelSize: 16; font.weight: Font.Medium }
-                                Text { text: "作品 → 评论 → 线索 → 互动"; color: window.muted; font.pixelSize: 11 }
+                                Text { text: "作品 → 评论 → 线索 → 互动"; color: window.muted; font.pixelSize: 12 }
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
@@ -4354,7 +4396,7 @@ ApplicationWindow {
                                         delegate: RowLayout {
                                             Layout.fillWidth: true
                                             Layout.preferredHeight: 38
-                                            Text { text: modelData.label; color: window.muted; Layout.preferredWidth: 42; font.pixelSize: 11 }
+                                            Text { text: modelData.label; color: window.muted; Layout.preferredWidth: 42; font.pixelSize: 12 }
                                             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 10; radius: 5; color: "#0d1727"; Rectangle { width: parent.width * Math.min(1, Number(analyticsPage.summary[modelData.key] || 0) / Math.max(1, Number(analyticsPage.summary.videos || 1))); height: parent.height; radius: 5; color: modelData.color } }
                                             Text { text: analyticsPage.summary[modelData.key] || 0; color: window.ink; Layout.preferredWidth: 58; horizontalAlignment: Text.AlignRight; font.pixelSize: 12 }
                                         }
@@ -4373,7 +4415,7 @@ ApplicationWindow {
                                 anchors.margins: 18
                                 spacing: 13
                                 Text { text: "平台概览"; color: window.ink; font.pixelSize: 16; font.weight: Font.Medium }
-                                Text { text: "六个平台统一接入，任务数据实时汇总"; color: window.muted; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                Text { text: "六个平台统一接入，任务数据实时汇总"; color: window.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                                 Repeater {
                                     model: ["抖音", "小红书", "B站", "微博", "快手"]
                                     delegate: Rectangle {
@@ -4386,12 +4428,12 @@ ApplicationWindow {
                                             anchors.leftMargin: 12
                                             anchors.rightMargin: 12
                                             Text { text: modelData; color: window.ink; Layout.fillWidth: true; font.pixelSize: 12 }
-                                            Text { text: "已接入"; color: window.green; font.pixelSize: 11 }
+                                            Text { text: "已接入"; color: window.green; font.pixelSize: 12 }
                                         }
                                     }
                                 }
                                 Item { Layout.fillHeight: true }
-                                Text { text: "数据更新时间跟随后台状态推送"; color: window.muted; font.pixelSize: 10 }
+                                Text { text: "数据更新时间跟随后台状态推送"; color: window.muted; font.pixelSize: 12 }
                             }
                         }
                     }
@@ -4415,50 +4457,50 @@ ApplicationWindow {
                     spacing: 14
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "诊断与设置"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
-                        Text { text: backend.diagnosticCheckedAt ? "最近检查：" + backend.diagnosticCheckedAt : "尚未检查"; color: window.muted; font.pixelSize: 11; Layout.leftMargin: 8 }
+                        Text { text: "诊断与设置"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                        Text { text: backend.diagnosticCheckedAt ? "最近检查：" + backend.diagnosticCheckedAt : "尚未检查"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 8 }
                         Item { Layout.fillWidth: true }
                         AppButton {
                             text: "运行五平台检查"
                             onClicked: backend.runPlatformHealth()
-                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: window.blue; border.color: window.line }
                         }
                         AppButton {
                             text: "检测端口"
                             onClicked: backend.inspectBitBrowser()
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: window.panel2; border.color: window.line }
                         }
                         AppButton {
                             text: "真实浏览器诊断"
                             onClicked: backend.runLiveDiagnostics()
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: window.panel2; border.color: window.line }
                         }
                         AppButton {
                             text: "导出日志"
                             onClicked: backend.exportOperationLog()
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: window.panel2; border.color: window.line }
                         }
                         AppButton {
                             text: "日志统计"
                             onClicked: logStatsDialog.open()
-                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: "transparent"; border.color: parent.hovered ? window.blue : "#365174" }
                         }
                         AppButton {
                             text: "刷新诊断"
                             onClicked: backend.refreshDiagnostics()
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: window.panel2; border.color: window.line }
                         }
                         AppButton {
                             text: backend.updateStatus.checking ? "检查中…" : "检查更新"
                             enabled: !backend.updateStatus.checking && !backend.updateStatus.updating
                             onClicked: backend.checkForUpdates()
-                            contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: parent.enabled && parent.hovered ? window.panel2 : "transparent"; border.color: parent.enabled && parent.hovered ? window.blue : window.line }
                         }
                         AppButton {
@@ -4466,7 +4508,7 @@ ApplicationWindow {
                             text: "立即更新并重启"
                             enabled: !backend.updateStatus.updating
                             onClicked: backend.installUpdate()
-                            contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                            contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                             background: Rectangle { radius: 8; color: parent.enabled ? window.blue : window.panel2; border.color: window.line }
                         }
                     }
@@ -4481,9 +4523,9 @@ ApplicationWindow {
                         maximumLineCount: 2
                         elide: Text.ElideRight
                         Layout.fillWidth: true
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                     }
-                    Text { text: backend.diagnosticExportPath ? "日志已导出：" + backend.diagnosticExportPath : "只读查看连接、账号和健康状态；不会因为刷新诊断而打开、关闭或操作浏览器"; color: backend.diagnosticExportPath ? window.green : window.muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Text { text: backend.diagnosticExportPath ? "日志已导出：" + backend.diagnosticExportPath : "只读查看连接、账号和健康状态；不会因为刷新诊断而打开、关闭或操作浏览器"; color: backend.diagnosticExportPath ? window.green : window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                     RowLayout {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 136
@@ -4492,9 +4534,9 @@ ApplicationWindow {
                             ColumnLayout { anchors.fill: parent; anchors.margins: 16; spacing: 7
                                 Text { text: "BitBrowser 连接"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
                                  Text { text: backend.diagnosticBitBrowser.configured ? "已配置本地服务" : "未配置本地服务"; color: backend.diagnosticBitBrowser.configured ? window.green : window.amber; font.pixelSize: 12 }
-                                 Text { text: backend.diagnosticBitBrowser.configured ? "检测超时：" + (backend.diagnosticBitBrowser.timeout || 20) + " 秒" : "请在设置中填写本地 API 地址"; color: window.muted; font.pixelSize: 11 }
-                                 Text { text: backend.diagnosticBitBrowserChecks.length ? "检测项：" + backend.diagnosticBitBrowserChecks.map(function(item) { return item.name + "·" + item.status }).join("  ") : "尚未执行端口检测"; color: window.muted; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
-                                 Text { text: backend.diagnosticBitBrowserWindows.length ? "已读取 " + backend.diagnosticBitBrowserWindows.length + " 个浏览器窗口" : ""; color: window.blue; font.pixelSize: 10 }
+                                 Text { text: backend.diagnosticBitBrowser.configured ? "检测超时：" + (backend.diagnosticBitBrowser.timeout || 20) + " 秒" : "请在设置中填写本地 API 地址"; color: window.muted; font.pixelSize: 12 }
+                                 Text { text: backend.diagnosticBitBrowserChecks.length ? "检测项：" + backend.diagnosticBitBrowserChecks.map(function(item) { return item.name + "·" + item.status }).join("  ") : "尚未执行端口检测"; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                                 Text { text: backend.diagnosticBitBrowserWindows.length ? "已读取 " + backend.diagnosticBitBrowserWindows.length + " 个浏览器窗口" : ""; color: window.blue; font.pixelSize: 12 }
                             }
                         }
                         Rectangle {
@@ -4502,7 +4544,7 @@ ApplicationWindow {
                             ColumnLayout { anchors.fill: parent; anchors.margins: 16; spacing: 7
                                 Text { text: "智能回复与评论分析 API"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
                                 Text { text: backend.diagnosticLlmApi.enabled ? "已启用配置" : "未启用配置"; color: backend.diagnosticLlmApi.enabled ? window.green : window.muted; font.pixelSize: 12 }
-                                Text { text: backend.diagnosticLlmApi.configured ? ((backend.diagnosticLlmApi.provider || "服务商") + " · " + (backend.diagnosticLlmApi.model || "未指定模型")) : "地址或密钥未完整配置"; color: window.muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
+                                Text { text: backend.diagnosticLlmApi.configured ? ((backend.diagnosticLlmApi.provider || "服务商") + " · " + (backend.diagnosticLlmApi.model || "未指定模型")) : "地址或密钥未完整配置"; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                             }
                         }
                     }
@@ -4514,9 +4556,9 @@ ApplicationWindow {
                             anchors.fill: parent; anchors.margins: 16; spacing: 8
                             RowLayout { Layout.fillWidth: true
                                 Text { text: "员工数据同步"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
-                                Text { text: "仅手动点击同步，不会自动上传"; color: window.muted; font.pixelSize: 10; Layout.leftMargin: 8 }
+                                Text { text: "仅手动点击同步，不会自动上传"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 8 }
                                 Item { Layout.fillWidth: true }
-                                Text { text: "待同步 " + (backend.syncStatus.pending || 0) + " 条"; color: (backend.syncStatus.pending || 0) > 0 ? window.amber : window.muted; font.pixelSize: 11 }
+                                Text { text: "待同步 " + (backend.syncStatus.pending || 0) + " 条"; color: (backend.syncStatus.pending || 0) > 0 ? window.amber : window.muted; font.pixelSize: 12 }
                             }
                             RowLayout { Layout.fillWidth: true; spacing: 8
                                 CheckBox {
@@ -4524,8 +4566,8 @@ ApplicationWindow {
                                     text: "启用同步"
                                     checked: Boolean(backend.syncStatus.enabled)
                                     spacing: 8; leftPadding: 24; implicitWidth: 92; Layout.preferredWidth: 92
-                                    contentItem: Text { text: syncEnabledCheck.text; color: syncEnabledCheck.checked ? window.blue : window.muted; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                    indicator: Rectangle { implicitWidth: 16; implicitHeight: 16; x: 0; y: (syncEnabledCheck.height - height) / 2; radius: 4; color: syncEnabledCheck.checked ? window.blue : "transparent"; border.color: syncEnabledCheck.checked ? window.blue : "#7187a3"; Text { anchors.centerIn: parent; text: "✓"; visible: syncEnabledCheck.checked; color: "#071224"; font.pixelSize: 11 } }
+                                    contentItem: Text { text: syncEnabledCheck.text; color: syncEnabledCheck.checked ? window.blue : window.muted; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
+                                    indicator: Rectangle { implicitWidth: 16; implicitHeight: 16; x: 0; y: (syncEnabledCheck.height - height) / 2; radius: 4; color: syncEnabledCheck.checked ? window.blue : "transparent"; border.color: syncEnabledCheck.checked ? window.blue : "#7187a3"; Text { anchors.centerIn: parent; text: "✓"; visible: syncEnabledCheck.checked; color: "#071224"; font.pixelSize: 12 } }
                                 }
                                 TextField { id: syncServerUrlField; Layout.fillWidth: true; text: backend.syncStatus.server_url || ""; color: window.ink; palette.placeholderText: window.muted; placeholderText: "同步服务器地址，例如 https://server.example.com"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                                 TextField { id: syncDeviceNameField; Layout.preferredWidth: 150; text: backend.syncStatus.device_name || ""; color: window.ink; palette.placeholderText: window.muted; placeholderText: "设备名称"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
@@ -4547,7 +4589,7 @@ ApplicationWindow {
                                         color: "#071224"
                                         horizontalAlignment: Text.AlignHCenter
                                         verticalAlignment: Text.AlignVCenter
-                                        font.pixelSize: 10
+                                        font.pixelSize: 12
                                     }
                                     background: Rectangle {
                                         radius: 7
@@ -4566,7 +4608,7 @@ ApplicationWindow {
                                         color: parent.enabled ? "#071224" : window.muted
                                         horizontalAlignment: Text.AlignHCenter
                                         verticalAlignment: Text.AlignVCenter
-                                        font.pixelSize: 10
+                                        font.pixelSize: 12
                                     }
                                     background: Rectangle {
                                         radius: 7
@@ -4575,7 +4617,7 @@ ApplicationWindow {
                                     }
                                 }
                             }
-                            Text { text: backend.syncStatus.status === "failed" || backend.syncStatus.status === "error" ? ("同步失败：" + (backend.syncStatus.last_error || "未知错误")) : backend.syncStatus.status === "success" ? ("最近同步完成：" + (backend.syncStatus.last_sync_at || "")) : "员工数据会按登录账号隔离；历史未归属数据不会被员工自动认领"; color: backend.syncStatus.status === "failed" || backend.syncStatus.status === "error" ? "#ff9b9b" : window.muted; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
+                            Text { text: backend.syncStatus.status === "failed" || backend.syncStatus.status === "error" ? ("同步失败：" + (backend.syncStatus.last_error || "未知错误")) : backend.syncStatus.status === "success" ? ("最近同步完成：" + (backend.syncStatus.last_sync_at || "")) : "员工数据会按登录账号隔离；历史未归属数据不会被员工自动认领"; color: backend.syncStatus.status === "failed" || backend.syncStatus.status === "error" ? "#ff9b9b" : window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                         }
                     }
                     Rectangle {
@@ -4588,17 +4630,17 @@ ApplicationWindow {
                         ColumnLayout { anchors.fill: parent; anchors.margins: 16; spacing: 7
                             RowLayout { Layout.fillWidth: true
                                 Text { text: "百度贴吧 API"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
-                                Text { text: backend.diagnosticTiebaApi.enabled ? "已启用" : "未启用"; color: backend.diagnosticTiebaApi.enabled ? window.green : window.muted; font.pixelSize: 11; Layout.leftMargin: 8 }
+                                Text { text: backend.diagnosticTiebaApi.enabled ? "已启用" : "未启用"; color: backend.diagnosticTiebaApi.enabled ? window.green : window.muted; font.pixelSize: 12; Layout.leftMargin: 8 }
                                 Item { Layout.fillWidth: true }
-                                Text { text: backend.diagnosticTiebaApi.configured ? "令牌已配置" : "令牌未配置"; color: backend.diagnosticTiebaApi.configured ? window.green : window.amber; font.pixelSize: 11 }
+                                Text { text: backend.diagnosticTiebaApi.configured ? "令牌已配置" : "令牌未配置"; color: backend.diagnosticTiebaApi.configured ? window.green : window.amber; font.pixelSize: 12 }
                             }
                             RowLayout { Layout.fillWidth: true; spacing: 8
-                                Text { text: "TB_TOKEN"; color: window.muted; Layout.preferredWidth: 76; font.pixelSize: 11 }
+                                Text { text: "TB_TOKEN"; color: window.muted; Layout.preferredWidth: 76; font.pixelSize: 12 }
                                 TextField { id: tiebaTokenField; Layout.fillWidth: true; echoMode: TextInput.Password; color: window.ink; palette.placeholderText: window.muted; placeholderText: backend.diagnosticTiebaApi.token_configured ? "留空保留已保存令牌" : "粘贴贴吧认证令牌"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                                CheckBox { id: tiebaEnabledCheck; text: "启用"; checked: Boolean(backend.diagnosticTiebaApi.enabled); spacing: 8; leftPadding: 24; implicitWidth: 68; contentItem: Text { text: tiebaEnabledCheck.text; color: tiebaEnabledCheck.checked ? window.blue : window.muted; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } indicator: Rectangle { implicitWidth: 16; implicitHeight: 16; x: 0; y: (tiebaEnabledCheck.height-height)/2; radius: 4; color: tiebaEnabledCheck.checked ? window.blue : "transparent"; border.color: tiebaEnabledCheck.checked ? window.blue : "#7187a3"; Text { anchors.centerIn: parent; text: "✓"; visible: tiebaEnabledCheck.checked; color: "#071224"; font.pixelSize: 11 } } }
-                                AppButton { text: "保存"; Layout.preferredWidth: 68; onClicked: backend.saveTiebaSettings(tiebaTokenField.text, tiebaEnabledCheck.checked); contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line } }
+                                CheckBox { id: tiebaEnabledCheck; text: "启用"; checked: Boolean(backend.diagnosticTiebaApi.enabled); spacing: 8; leftPadding: 24; implicitWidth: 68; contentItem: Text { text: tiebaEnabledCheck.text; color: tiebaEnabledCheck.checked ? window.blue : window.muted; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } indicator: Rectangle { implicitWidth: 16; implicitHeight: 16; x: 0; y: (tiebaEnabledCheck.height-height)/2; radius: 4; color: tiebaEnabledCheck.checked ? window.blue : "transparent"; border.color: tiebaEnabledCheck.checked ? window.blue : "#7187a3"; Text { anchors.centerIn: parent; text: "✓"; visible: tiebaEnabledCheck.checked; color: "#071224"; font.pixelSize: 12 } } }
+                                AppButton { text: "保存"; Layout.preferredWidth: 68; onClicked: backend.saveTiebaSettings(tiebaTokenField.text, tiebaEnabledCheck.checked); contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line } }
                             }
-                            Text { text: backend.diagnosticTiebaApi.configured ? "已连接官方贴吧接口，可创建贴吧采集任务" : "尚未配置 TB_TOKEN；未配置时贴吧任务不会启动"; color: backend.diagnosticTiebaApi.configured ? window.green : window.muted; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
+                            Text { text: backend.diagnosticTiebaApi.configured ? "已连接官方贴吧接口，可创建贴吧采集任务" : "尚未配置 TB_TOKEN；未配置时贴吧任务不会启动"; color: backend.diagnosticTiebaApi.configured ? window.green : window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                         }
                     }
                     Rectangle {
@@ -4611,14 +4653,14 @@ ApplicationWindow {
                             columns: 4
                             columnSpacing: 10
                             rowSpacing: 8
-                            Text { text: "BitBrowser 地址"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+                            Text { text: "BitBrowser 地址"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                             TextField { id: bitbrowserUrlField; Layout.fillWidth: true; Layout.columnSpan: 2; text: backend.diagnosticBitBrowser.base_url || "http://127.0.0.1:54345"; color: window.ink; palette.placeholderText: window.muted; placeholderText: "http://127.0.0.1:54345"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                             TextField { id: bitbrowserTimeoutField; Layout.preferredWidth: 72; text: String(backend.diagnosticBitBrowser.timeout || 20); color: window.ink; palette.placeholderText: window.muted; placeholderText: "秒"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                            Text { text: "服务商"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+                            Text { text: "服务商"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                             TextField { id: apiProviderField; Layout.fillWidth: true; text: backend.diagnosticLlmApi.provider || ""; color: window.ink; palette.placeholderText: window.muted; placeholderText: "服务商"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                             TextField { id: apiUrlField; Layout.fillWidth: true; text: backend.diagnosticLlmApi.base_url || ""; color: window.ink; palette.placeholderText: window.muted; placeholderText: "智能 API 地址"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                             TextField { id: apiModelField; Layout.fillWidth: true; text: backend.diagnosticLlmApi.model || ""; color: window.ink; palette.placeholderText: window.muted; placeholderText: "模型名称"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                            Text { text: "API Key"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+                            Text { text: "API Key"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                             TextField { id: apiKeyField; Layout.fillWidth: true; Layout.columnSpan: 2; echoMode: TextInput.Password; color: window.ink; palette.placeholderText: window.muted; placeholderText: "留空表示保留已保存密钥"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                             RowLayout { Layout.fillWidth: true; spacing: 8
                                 CheckBox {
@@ -4630,17 +4672,17 @@ ApplicationWindow {
                                     implicitWidth: 92
                                     Layout.preferredWidth: 92
                                     Layout.minimumWidth: 92
-                                    contentItem: Text { text: apiEnabledCheck.text; color: apiEnabledCheck.checked ? window.blue : window.muted; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                    contentItem: Text { text: apiEnabledCheck.text; color: apiEnabledCheck.checked ? window.blue : window.muted; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                     indicator: Rectangle {
                                         implicitWidth: 16; implicitHeight: 16
                                         x: 0; y: (apiEnabledCheck.height - height) / 2
                                         radius: 4
                                         color: apiEnabledCheck.checked ? window.blue : "transparent"
                                         border.color: apiEnabledCheck.checked ? window.blue : "#7187a3"
-                                        Text { anchors.centerIn: parent; text: "✓"; visible: apiEnabledCheck.checked; color: "#071224"; font.pixelSize: 11 }
+                                        Text { anchors.centerIn: parent; text: "✓"; visible: apiEnabledCheck.checked; color: "#071224"; font.pixelSize: 12 }
                                     }
                                 }
-                                AppButton { text: "保存设置"; onClicked: backend.saveSettings(bitbrowserUrlField.text, parseInt(bitbrowserTimeoutField.text || "20"), apiProviderField.text, apiUrlField.text, apiKeyField.text, apiModelField.text, apiEnabledCheck.checked); contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 7; color: window.blue; border.color: window.line } }
+                                AppButton { text: "保存设置"; onClicked: backend.saveSettings(bitbrowserUrlField.text, parseInt(bitbrowserTimeoutField.text || "20"), apiProviderField.text, apiUrlField.text, apiKeyField.text, apiModelField.text, apiEnabledCheck.checked); contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: window.blue; border.color: window.line } }
                             }
                         }
                     }
@@ -4656,7 +4698,7 @@ ApplicationWindow {
                                 ListView {
                                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 1
                                     model: backend.diagnosticBitBrowserChecks
-                                    delegate: Text { width: ListView.view.width; height: 28; text: modelData.name + "：" + modelData.status + (modelData.detail ? " · " + modelData.detail : ""); color: modelData.status === "正常" ? window.green : window.amber; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    delegate: Text { width: ListView.view.width; height: 28; text: modelData.name + "：" + modelData.status + (modelData.detail ? " · " + modelData.detail : ""); color: modelData.status === "正常" ? window.green : window.amber; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 }
                             }
                             ColumnLayout {
@@ -4665,7 +4707,7 @@ ApplicationWindow {
                                 ListView {
                                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 1
                                     model: backend.diagnosticBitBrowserWindows
-                                    delegate: Text { width: ListView.view.width; height: 28; text: (modelData.name || "未命名窗口") + " · " + (modelData.port || "未识别端口") + (modelData.opened ? " · 已打开" : " · 未打开"); color: modelData.opened ? window.green : window.muted; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    delegate: Text { width: ListView.view.width; height: 28; text: (modelData.name || "未命名窗口") + " · " + (modelData.port || "未识别端口") + (modelData.opened ? " · 已打开" : " · 未打开"); color: modelData.opened ? window.green : window.muted; elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 }
                             }
                         }
@@ -4684,8 +4726,8 @@ ApplicationWindow {
                                     RowLayout { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 12
                                         Text { text: modelData.platform_label; color: window.blue; Layout.preferredWidth: 72; font.pixelSize: 12 }
                                         Text { text: modelData.status_label || "未检查"; color: modelData.status === "ok" ? window.green : window.amber; Layout.preferredWidth: 80; font.pixelSize: 12 }
-                                        Text { text: modelData.detail || "暂无检查记录"; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 11 }
-                                        Text { text: modelData.accounts !== undefined ? (modelData.accounts + " 个账号") : ""; color: window.muted; Layout.preferredWidth: 72; font.pixelSize: 11 }
+                                        Text { text: modelData.detail || "暂无检查记录"; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12 }
+                                        Text { text: modelData.accounts !== undefined ? (modelData.accounts + " 个账号") : ""; color: window.muted; Layout.preferredWidth: 72; font.pixelSize: 12 }
                                     }
                                 }
                             }
@@ -4706,8 +4748,8 @@ ApplicationWindow {
                                     RowLayout { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 12
                                         Text { text: modelData.platform_label; color: window.blue; Layout.preferredWidth: 72; font.pixelSize: 12 }
                                         Text { text: modelData.status_label || "未检查"; color: modelData.status === "ok" ? window.green : window.amber; Layout.preferredWidth: 64; font.pixelSize: 12 }
-                                        Text { text: modelData.detail || "暂无诊断说明"; color: window.muted; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideRight; font.pixelSize: 10 }
-                                        Text { text: modelData.accounts !== undefined ? modelData.accounts + " 个账号" : ""; color: window.muted; Layout.preferredWidth: 72; font.pixelSize: 10 }
+                                        Text { text: modelData.detail || "暂无诊断说明"; color: window.muted; Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideRight; font.pixelSize: 12 }
+                                        Text { text: modelData.accounts !== undefined ? modelData.accounts + " 个账号" : ""; color: window.muted; Layout.preferredWidth: 72; font.pixelSize: 12 }
                                     }
                                 }
                             }
@@ -4722,7 +4764,7 @@ ApplicationWindow {
                                 ListView {
                                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 1
                                     model: backend.diagnosticAccountRows
-                                    delegate: Rectangle { width: ListView.view.width; height: 34; color: index % 2 === 0 ? "transparent" : "#17273d"; RowLayout { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; Text { text: modelData.platform_label; color: window.blue; Layout.preferredWidth: 72; font.pixelSize: 11 } Text { text: modelData.accounts + " 个账号"; color: window.ink; Layout.fillWidth: true; font.pixelSize: 11 } Text { text: "已绑定 " + modelData.bound_accounts; color: window.muted; Layout.preferredWidth: 72; font.pixelSize: 11 } Text { text: modelData.waiting_human ? (modelData.waiting_human + " 待处理") : ""; color: window.amber; Layout.preferredWidth: 72; font.pixelSize: 11 } } }
+                                    delegate: Rectangle { width: ListView.view.width; height: 34; color: index % 2 === 0 ? "transparent" : "#17273d"; RowLayout { anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; Text { text: modelData.platform_label; color: window.blue; Layout.preferredWidth: 72; font.pixelSize: 12 } Text { text: modelData.accounts + " 个账号"; color: window.ink; Layout.fillWidth: true; font.pixelSize: 12 } Text { text: "已绑定 " + modelData.bound_accounts; color: window.muted; Layout.preferredWidth: 72; font.pixelSize: 12 } Text { text: modelData.waiting_human ? (modelData.waiting_human + " 待处理") : ""; color: window.amber; Layout.preferredWidth: 72; font.pixelSize: 12 } } }
                                 }
                             }
                         }
@@ -4732,12 +4774,12 @@ ApplicationWindow {
                                 RowLayout { Layout.fillWidth: true
                                     Text { text: "当天运行日志"; color: window.ink; font.pixelSize: 15; font.weight: Font.Medium }
                                     Item { Layout.fillWidth: true }
-                                    Text { text: (backend.diagnosticLogStats.total || 0) + " 条"; color: window.muted; font.pixelSize: 10 }
+                                    Text { text: (backend.diagnosticLogStats.total || 0) + " 条"; color: window.muted; font.pixelSize: 12 }
                                 }
                                 ListView {
                                     Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 1
                                     model: backend.diagnosticLogs
-                                    delegate: Text { width: ListView.view.width; height: 28; text: "[" + String(modelData.timestamp || "").slice(-12) + "] [" + String(modelData.source || "") + "] " + modelData.message + (modelData.details && Object.keys(modelData.details).length ? " · 详情=" + JSON.stringify(modelData.details) : ""); color: modelData.level === "error" ? "#ff9b9b" : (modelData.level === "warning" ? window.amber : window.green); elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                    delegate: Text { width: ListView.view.width; height: 28; text: "[" + String(modelData.timestamp || "").slice(-12) + "] [" + String(modelData.source || "") + "] " + modelData.message + (modelData.details && Object.keys(modelData.details).length ? " · 详情=" + JSON.stringify(modelData.details) : ""); color: modelData.level === "error" ? "#ff9b9b" : (modelData.level === "warning" ? window.amber : window.green); elide: Text.ElideRight; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 }
                             }
                         }
@@ -5309,7 +5351,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         spacing: 3
                         Text { text: backend.authEmployeeName || "未设置姓名"; color: window.ink; font.pixelSize: 14; font.weight: Font.Medium; elide: Text.ElideRight; Layout.fillWidth: true }
-                        Text { text: "账号：" + (backend.authUsername || "未知") + (backend.authIsAdmin ? "  ·  管理员" : "  ·  员工"); color: window.muted; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
+                        Text { text: "账号：" + (backend.authUsername || "未知") + (backend.authIsAdmin ? "  ·  管理员" : "  ·  员工"); color: window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                     }
                 }
             }
@@ -5322,15 +5364,15 @@ ApplicationWindow {
                     color: backend.syncStatus.status === "error" || backend.syncStatus.status === "failed" ? "#ff9b9b" : window.muted
                     Layout.fillWidth: true
                     elide: Text.ElideRight
-                    font.pixelSize: 11
+                    font.pixelSize: 12
                 }
                 AppButton {
                     text: "立即上传"
                     enabled: Boolean(backend.syncStatus.enabled)
                     Layout.preferredWidth: 88
-                    Layout.preferredHeight: 32
+                    Layout.preferredHeight: window.controlHeight
                     onClicked: backend.syncNow()
-                    contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: parent.enabled ? window.blue : window.panel2; border.color: window.line }
                 }
             }
@@ -5339,7 +5381,7 @@ ApplicationWindow {
                 color: backend.syncStatus.status === "error" || backend.syncStatus.status === "failed" ? "#ff9b9b" : window.muted
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                font.pixelSize: 10
+                font.pixelSize: 12
             }
             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
             Text { visible: backend.authIsAdmin; text: "管理员功能"; color: window.ink; font.pixelSize: 13; font.weight: Font.Medium }
@@ -5350,17 +5392,17 @@ ApplicationWindow {
                 AppButton {
                     text: "用户审批"
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 34
+                    Layout.preferredHeight: window.controlHeight
                     onClicked: { personalCenterDialog.close(); backend.refreshAuthUsers(); adminUsersDialog.open() }
-                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: parent.hovered ? "#182748" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                 }
                 AppButton {
                     text: "管理员中心"
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 34
+                    Layout.preferredHeight: window.controlHeight
                     onClicked: { personalCenterDialog.close(); backend.refreshAdminDashboard(); adminCenterDialog.open() }
-                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: parent.hovered ? "#182748" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                 }
             }
@@ -5397,7 +5439,7 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 8
-            Text { text: "管理员可以审批、拒绝或禁用员工账号。默认管理员：admin"; color: window.muted; font.pixelSize: 11; Layout.fillWidth: true }
+            Text { text: "管理员可以审批、拒绝或禁用员工账号。默认管理员：admin"; color: window.muted; font.pixelSize: 12; Layout.fillWidth: true }
             ListView {
                 id: adminUserList
                 Layout.fillWidth: true
@@ -5419,12 +5461,12 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             spacing: 2
                             Text { text: modelData.employee_name + "  ·  " + modelData.username; color: window.ink; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
-                            Text { text: "创建于 " + (modelData.created_at || "暂无"); color: window.muted; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
+                            Text { text: "创建于 " + (modelData.created_at || "暂无"); color: window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                         }
-                        Text { text: adminUsersDialog.statusLabel(modelData.status); color: modelData.status === "approved" ? window.green : (modelData.status === "pending" ? window.amber : window.muted); font.pixelSize: 11; Layout.preferredWidth: 54; horizontalAlignment: Text.AlignHCenter }
-                        AppButton { visible: modelData.status === "pending"; text: "通过"; Layout.preferredWidth: 58; Layout.preferredHeight: 30; onClicked: backend.approveAuthUser(Number(modelData.id)); contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 6; color: window.green } }
-                        AppButton { visible: modelData.status === "pending"; text: "拒绝"; Layout.preferredWidth: 58; Layout.preferredHeight: 30; onClicked: backend.rejectAuthUser(Number(modelData.id)); contentItem: Text { text: parent.text; color: "#ffd9df"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 6; color: "#5a2f3b"; border.color: "#8b4d5a" } }
-                        AppButton { visible: modelData.status === "approved" && modelData.username !== "admin"; text: "禁用"; Layout.preferredWidth: 58; Layout.preferredHeight: 30; onClicked: backend.disableAuthUser(Number(modelData.id)); contentItem: Text { text: parent.text; color: window.amber; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 6; color: "transparent"; border.color: window.line } }
+                        Text { text: adminUsersDialog.statusLabel(modelData.status); color: modelData.status === "approved" ? window.green : (modelData.status === "pending" ? window.amber : window.muted); font.pixelSize: 12; Layout.preferredWidth: 54; horizontalAlignment: Text.AlignHCenter }
+                        AppButton { visible: modelData.status === "pending"; text: "通过"; Layout.preferredWidth: 58; Layout.preferredHeight: 30; onClicked: backend.approveAuthUser(Number(modelData.id)); contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 6; color: window.green } }
+                        AppButton { visible: modelData.status === "pending"; text: "拒绝"; Layout.preferredWidth: 58; Layout.preferredHeight: 30; onClicked: backend.rejectAuthUser(Number(modelData.id)); contentItem: Text { text: parent.text; color: "#ffd9df"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 6; color: "#5a2f3b"; border.color: "#8b4d5a" } }
+                        AppButton { visible: modelData.status === "approved" && modelData.username !== "admin"; text: "禁用"; Layout.preferredWidth: 58; Layout.preferredHeight: 30; onClicked: backend.disableAuthUser(Number(modelData.id)); contentItem: Text { text: parent.text; color: window.amber; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 6; color: "transparent"; border.color: window.line } }
                     }
                 }
                 Text { anchors.centerIn: parent; visible: adminUserList.count === 0; text: "暂无账号申请"; color: window.muted; font.pixelSize: 12 }
@@ -5502,7 +5544,7 @@ ApplicationWindow {
                             Text {
                                 text: modelData.label
                                 color: window.muted
-                                font.pixelSize: 10
+                                font.pixelSize: 12
                                 Layout.fillWidth: true
                             }
                             Text {
@@ -5520,7 +5562,7 @@ ApplicationWindow {
                 visible: String(backend.adminDashboard.error || "") !== ""
                 text: "操作失败：" + String(backend.adminDashboard.error || "")
                 color: "#ff9b9b"
-                font.pixelSize: 11
+                font.pixelSize: 12
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
@@ -5528,7 +5570,7 @@ ApplicationWindow {
                 visible: String(((backend.adminDashboard.last_action || {}).message) || "") !== ""
                 text: String((backend.adminDashboard.last_action || {}).message || "")
                 color: window.green
-                font.pixelSize: 11
+                font.pixelSize: 12
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
@@ -5557,7 +5599,7 @@ ApplicationWindow {
                                 Layout.preferredWidth: 70
                                 Layout.preferredHeight: 28
                                 onClicked: backend.refreshAdminDashboard()
-                                contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 background: Rectangle { radius: 6; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                             }
                             AppButton {
@@ -5565,7 +5607,7 @@ ApplicationWindow {
                                 Layout.preferredWidth: 82
                                 Layout.preferredHeight: 28
                                 onClicked: { backend.refreshAuthUsers(); adminUsersDialog.open() }
-                                contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 background: Rectangle { radius: 6; color: "transparent"; border.color: parent.hovered ? window.blue : window.line }
                             }
                         }
@@ -5590,10 +5632,10 @@ ApplicationWindow {
                                         Layout.fillWidth: true
                                         spacing: 3
                                         Text { text: (modelData.employee_name || "未填写姓名") + " · " + (modelData.username || ""); color: window.ink; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Text { text: "状态：" + (modelData.status === "approved" ? "已通过" : (modelData.status === "pending" ? "待审批" : "已停用")) + " · 最近登录：" + (modelData.last_login_at || "暂无"); color: window.muted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Text { text: "状态：" + (modelData.status === "approved" ? "已通过" : (modelData.status === "pending" ? "待审批" : "已停用")) + " · 最近登录：" + (modelData.last_login_at || "暂无"); color: window.muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                                     }
-                                    Text { text: "任务 " + (modelData.tasks || 0) + "\n账号 " + (modelData.accounts || 0) + "\n线索 " + (modelData.leads || 0); color: window.blue; font.pixelSize: 10; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
-                                    Text { text: "互动 " + (modelData.interactions || 0) + "\n发布 " + (modelData.publish_drafts || 0) + "\n待同步 " + (modelData.pending_sync || 0); color: window.muted; font.pixelSize: 10; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
+                                    Text { text: "任务 " + (modelData.tasks || 0) + "\n账号 " + (modelData.accounts || 0) + "\n线索 " + (modelData.leads || 0); color: window.blue; font.pixelSize: 12; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                    Text { text: "互动 " + (modelData.interactions || 0) + "\n发布 " + (modelData.publish_drafts || 0) + "\n待同步 " + (modelData.pending_sync || 0); color: window.muted; font.pixelSize: 12; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
                                 }
                             }
                             Text { anchors.centerIn: parent; visible: adminEmployeeList.count === 0; text: "暂无员工数据"; color: window.muted; font.pixelSize: 12 }
@@ -5607,7 +5649,7 @@ ApplicationWindow {
                         RowLayout {
                             Layout.fillWidth: true
                             Text { text: "员工设备"; color: window.ink; font.pixelSize: 13; font.weight: Font.Medium; Layout.fillWidth: true }
-                            Text { text: "停用后该设备下次登录将被拒绝"; color: window.muted; font.pixelSize: 10 }
+                            Text { text: "停用后该设备下次登录将被拒绝"; color: window.muted; font.pixelSize: 12 }
                         }
                         ListView {
                             id: adminDeviceList
@@ -5629,16 +5671,16 @@ ApplicationWindow {
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         spacing: 3
-                                        Text { text: (modelData.device_name || "未命名设备") + " · " + (modelData.employee_name || modelData.username || ""); color: window.ink; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Text { text: "最后活动：" + (modelData.last_seen_at || "暂无") + " · 版本：" + (modelData.client_version || "未知"); color: window.muted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Text { text: (modelData.device_name || "未命名设备") + " · " + (modelData.employee_name || modelData.username || ""); color: window.ink; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Text { text: "最后活动：" + (modelData.last_seen_at || "暂无") + " · 版本：" + (modelData.client_version || "未知"); color: window.muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                                     }
-                                    Text { text: modelData.status === "active" ? "正常" : "已停用"; color: modelData.status === "active" ? window.green : window.amber; Layout.preferredWidth: 58; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 11 }
+                                    Text { text: modelData.status === "active" ? "正常" : "已停用"; color: modelData.status === "active" ? window.green : window.amber; Layout.preferredWidth: 58; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 12 }
                                     AppButton {
                                         text: modelData.status === "active" ? "停用" : "启用"
                                         Layout.preferredWidth: 62
                                         Layout.preferredHeight: 28
                                         onClicked: backend.setAdminDeviceStatus(Number(modelData.id), modelData.status === "active" ? "disabled" : "active")
-                                        contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                        contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                         background: Rectangle { radius: 6; color: parent.hovered ? window.panel2 : "transparent"; border.color: parent.hovered ? window.blue : window.line }
                                     }
                                 }
@@ -5654,13 +5696,13 @@ ApplicationWindow {
                         RowLayout {
                             Layout.fillWidth: true
                             Text { text: "管理员审计日志"; color: window.ink; font.pixelSize: 13; font.weight: Font.Medium; Layout.fillWidth: true }
-                            Text { text: "正常 " + (((backend.adminDashboard.audit || {}).counts || {}).normal || 0) + " · 警告 " + (((backend.adminDashboard.audit || {}).counts || {}).warning || 0) + " · 错误 " + (((backend.adminDashboard.audit || {}).counts || {}).error || 0); color: window.muted; font.pixelSize: 10 }
+                            Text { text: "正常 " + (((backend.adminDashboard.audit || {}).counts || {}).normal || 0) + " · 警告 " + (((backend.adminDashboard.audit || {}).counts || {}).warning || 0) + " · 错误 " + (((backend.adminDashboard.audit || {}).counts || {}).error || 0); color: window.muted; font.pixelSize: 12 }
                             AppButton {
                                 text: "刷新"
                                 Layout.preferredWidth: 70
                                 Layout.preferredHeight: 28
                                 onClicked: backend.refreshAdminDashboard()
-                                contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 background: Rectangle { radius: 6; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                             }
                         }
@@ -5680,10 +5722,10 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     anchors.margins: 8
                                     spacing: 8
-                                    Text { text: String(modelData.timestamp || "").slice(11, 19); color: window.muted; Layout.preferredWidth: 62; font.pixelSize: 10 }
-                                    Text { text: modelData.level === "error" ? "错误" : (modelData.level === "warning" ? "警告" : "正常"); color: modelData.level === "error" ? "#ff9b9b" : (modelData.level === "warning" ? window.amber : window.green); Layout.preferredWidth: 40; font.pixelSize: 10 }
-                                    Text { text: (modelData.actor_username || "系统") + " · " + (modelData.action || modelData.event || "操作"); color: window.blue; Layout.preferredWidth: 150; font.pixelSize: 10; elide: Text.ElideRight }
-                                    Text { text: modelData.message || ""; color: window.ink; Layout.fillWidth: true; font.pixelSize: 10; elide: Text.ElideRight }
+                                    Text { text: String(modelData.timestamp || "").slice(11, 19); color: window.muted; Layout.preferredWidth: 62; font.pixelSize: 12 }
+                                    Text { text: modelData.level === "error" ? "错误" : (modelData.level === "warning" ? "警告" : "正常"); color: modelData.level === "error" ? "#ff9b9b" : (modelData.level === "warning" ? window.amber : window.green); Layout.preferredWidth: 40; font.pixelSize: 12 }
+                                    Text { text: (modelData.actor_username || "系统") + " · " + (modelData.action || modelData.event || "操作"); color: window.blue; Layout.preferredWidth: 150; font.pixelSize: 12; elide: Text.ElideRight }
+                                    Text { text: modelData.message || ""; color: window.ink; Layout.fillWidth: true; font.pixelSize: 12; elide: Text.ElideRight }
                                 }
                             }
                             Text { anchors.centerIn: parent; visible: adminAuditList.count === 0; text: "暂无审计日志"; color: window.muted; font.pixelSize: 12 }
@@ -5702,7 +5744,7 @@ ApplicationWindow {
                                 Layout.preferredWidth: 88
                                 Layout.preferredHeight: 30
                                 onClicked: backend.createAdminBackup()
-                                contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 background: Rectangle { radius: 7; color: window.blue; border.color: window.line }
                             }
                             AppButton {
@@ -5710,11 +5752,11 @@ ApplicationWindow {
                                 Layout.preferredWidth: 70
                                 Layout.preferredHeight: 30
                                 onClicked: backend.refreshAdminBackups()
-                                contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                                contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                 background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                             }
                         }
-                        Text { text: "恢复操作只生成校验后的新文件，不覆盖当前运行数据库；需要切换数据时再由管理员安排停机替换。"; color: window.amber; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                        Text { text: "恢复操作只生成校验后的新文件，不覆盖当前运行数据库；需要切换数据时再由管理员安排停机替换。"; color: window.amber; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                         ListView {
                             id: adminBackupList
                             Layout.fillWidth: true
@@ -5735,15 +5777,15 @@ ApplicationWindow {
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         spacing: 3
-                                        Text { text: "备份#" + modelData.id + " · " + (modelData.kind || "手动") + " · " + (modelData.verified ? "已校验" : "未校验"); color: modelData.verified ? window.green : window.amber; font.pixelSize: 11; Layout.fillWidth: true; elide: Text.ElideRight }
-                                        Text { text: (modelData.created_at || "") + " · " + Math.round(Number(modelData.size_bytes || 0) / 1024) + " KB"; color: window.muted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Text { text: "备份#" + modelData.id + " · " + (modelData.kind || "手动") + " · " + (modelData.verified ? "已校验" : "未校验"); color: modelData.verified ? window.green : window.amber; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                        Text { text: (modelData.created_at || "") + " · " + Math.round(Number(modelData.size_bytes || 0) / 1024) + " KB"; color: window.muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                                     }
                                     AppButton {
                                         text: "校验"
                                         Layout.preferredWidth: 62
                                         Layout.preferredHeight: 28
                                         onClicked: backend.validateAdminBackup(Number(modelData.id))
-                                        contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                        contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                         background: Rectangle { radius: 6; color: "transparent"; border.color: parent.hovered ? window.blue : window.line }
                                     }
                                     AppButton {
@@ -5751,7 +5793,7 @@ ApplicationWindow {
                                         Layout.preferredWidth: 78
                                         Layout.preferredHeight: 28
                                         onClicked: backend.restoreAdminBackup(Number(modelData.id))
-                                        contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                                        contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                                         background: Rectangle { radius: 6; color: "transparent"; border.color: parent.hovered ? window.blue : window.line }
                                     }
                                 }
@@ -5795,7 +5837,7 @@ ApplicationWindow {
             Text {
                 text: "删除会清理该任务及其采集数据，操作不可恢复。运行中的任务会先安全停止。"
                 color: window.amber
-                font.pixelSize: 11
+                font.pixelSize: 12
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
@@ -5806,13 +5848,13 @@ ApplicationWindow {
             AppButton {
                 text: "取消"
                 onClicked: deleteConfirmDialog.reject()
-                contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                 background: Rectangle { radius: 7; color: "transparent"; border.color: window.line }
             }
             AppButton {
                 text: "确认删除"
                 onClicked: tasksPage.confirmDelete()
-                contentItem: Text { text: parent.text; color: "#fff1f3"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                contentItem: Text { text: parent.text; color: "#fff1f3"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                 background: Rectangle { radius: 7; color: "#b95768"; border.color: "#e97583" }
             }
         }
@@ -5840,7 +5882,7 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 10
             Text { text: "开启后，点击“发送”会执行平台页面上的最终发送按钮。请确认当前账号、内容和目标均已人工审核。"; color: window.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
-            Text { text: "测试阶段建议保持关闭；关闭时只填入回复框，不会提交。"; color: window.amber; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
+            Text { text: "测试阶段建议保持关闭；关闭时只填入回复框，不会提交。"; color: window.amber; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
         }
         footer: RowLayout {
             spacing: 8
@@ -5863,7 +5905,7 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 10
             Text { text: "开启后，发布中心的“开始真实发布”会打开当前平台账号，并点击页面上的最终发布按钮。"; color: window.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
-            Text { text: "请先确认平台、账号、标题、正文和素材均已人工审核。测试时请保持关闭，预览填充不会发送。"; color: window.amber; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
+            Text { text: "请先确认平台、账号、标题、正文和素材均已人工审核。测试时请保持关闭，预览填充不会发送。"; color: window.amber; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
         }
         footer: RowLayout {
             spacing: 8
@@ -5885,7 +5927,7 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 10
             Text { text: "即将打开“" + publishPage.selectedAccountName() + "”并在“" + publishPage.platformLabel(publishPage.selectedPlatform) + "”页面执行最终发布。"; color: window.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
-            Text { text: "此操作会产生真实平台状态变化。只有已批准或待发布内容可以执行。"; color: "#ffb0b0"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
+            Text { text: "此操作会产生真实平台状态变化。只有已批准或待发布内容可以执行。"; color: "#ffb0b0"; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
         }
         footer: RowLayout {
             spacing: 8
@@ -6059,11 +6101,11 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 12
-            Text { text: "北京时间 (UTC+8)"; color: window.muted; font.pixelSize: 10; Layout.fillWidth: true }
+            Text { text: "北京时间 (UTC+8)"; color: window.muted; font.pixelSize: 12; Layout.fillWidth: true }
             RowLayout {
                 Layout.fillWidth: true
                 AppButton {
-                    text: "‹"; Layout.preferredWidth: 38; Layout.preferredHeight: 34
+                    text: "‹"; Layout.preferredWidth: 38; Layout.preferredHeight: window.controlHeight
                     enabled: schedulePickerDialog.calendarCells.length > 0
                     onClicked: schedulePickerDialog.moveMonth(-1)
                     contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 22 }
@@ -6071,7 +6113,7 @@ ApplicationWindow {
                 }
                 Text { text: schedulePickerDialog.monthTitle(); color: window.ink; font.pixelSize: 17; font.weight: Font.DemiBold; horizontalAlignment: Text.AlignHCenter; Layout.fillWidth: true }
                 AppButton {
-                    text: "›"; Layout.preferredWidth: 38; Layout.preferredHeight: 34
+                    text: "›"; Layout.preferredWidth: 38; Layout.preferredHeight: window.controlHeight
                     enabled: schedulePickerDialog.calendarCells.length > 0
                     onClicked: schedulePickerDialog.moveMonth(1)
                     contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 22 }
@@ -6090,7 +6132,7 @@ ApplicationWindow {
                         horizontalAlignment: Text.AlignHCenter
                         text: modelData
                         color: window.muted
-                        font.pixelSize: 10
+                        font.pixelSize: 12
                     }
                 }
                 Repeater {
@@ -6107,7 +6149,7 @@ ApplicationWindow {
                             color: !cellData.inMonth ? "#536681" : (cellData.enabled ? window.ink : "#536681")
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
-                            font.pixelSize: 11
+                            font.pixelSize: 12
                             font.weight: cellData.selected ? Font.DemiBold : Font.Normal
                         }
                         background: Rectangle {
@@ -6124,10 +6166,10 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 4
-                    Text { text: "小时"; color: window.muted; font.pixelSize: 10 }
+                    Text { text: "小时"; color: window.muted; font.pixelSize: 12 }
                     ComboBox {
                         id: schedulePickerHourChooser
-                        Layout.fillWidth: true; Layout.preferredHeight: 34
+                        Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight
                         model: schedulePickerDialog.hourOptions()
                         textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                         onModelChanged: schedulePickerDialog.syncTimeControls()
@@ -6141,10 +6183,10 @@ ApplicationWindow {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 4
-                    Text { text: "分钟"; color: window.muted; font.pixelSize: 10 }
+                    Text { text: "分钟"; color: window.muted; font.pixelSize: 12 }
                     ComboBox {
                         id: schedulePickerMinuteChooser
-                        Layout.fillWidth: true; Layout.preferredHeight: 34
+                        Layout.fillWidth: true; Layout.preferredHeight: window.controlHeight
                         model: schedulePickerDialog.minuteOptions()
                         textRole: "label"; valueRole: "value"; delegate: darkComboDelegate
                         onModelChanged: schedulePickerDialog.syncTimeControls()
@@ -6157,20 +6199,20 @@ ApplicationWindow {
                     }
                 }
             }
-            Text { text: "不可选择过去的时间 · 当前北京时间 " + String(backend.beijingNowText || "").slice(0, 16); color: window.muted; font.pixelSize: 10; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+            Text { text: "不可选择过去的时间 · 当前北京时间 " + String(backend.beijingNowText || "").slice(0, 16); color: window.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
         }
         footer: RowLayout {
             spacing: 8
             Item { Layout.fillWidth: true }
             AppButton {
                 text: "取消"; onClicked: schedulePickerDialog.reject()
-                contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                 background: Rectangle { radius: 7; color: parent.hovered ? window.panel2 : "transparent"; border.color: window.line }
             }
             AppButton {
                 text: "确定"; enabled: Boolean(schedulePickerDialog.draftDate && schedulePickerDialog.draftHour && schedulePickerDialog.draftMinute)
                 onClicked: if (schedulePickerDialog.confirmSelection()) schedulePickerDialog.accept()
-                contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11; font.weight: Font.DemiBold }
+                contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.weight: Font.DemiBold }
                 background: Rectangle { radius: 7; color: parent.enabled ? (parent.hovered ? "#8bbaff" : window.blue) : window.panel2 }
             }
         }
@@ -6204,20 +6246,20 @@ ApplicationWindow {
             Text { text: "任务 #" + (monitorDialog.taskData.id || "") + " · " + (monitorDialog.taskData.keyword || ""); color: window.ink; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
             RowLayout {
                 Layout.fillWidth: true
-                Text { text: "监控状态"; color: window.muted; Layout.preferredWidth: 100; font.pixelSize: 11 }
+                Text { text: "监控状态"; color: window.muted; Layout.preferredWidth: 100; font.pixelSize: 12 }
                 AppCheckBox { id: monitorEnabledCheck; text: "启用定时增量监控"; Layout.fillWidth: true }
             }
             RowLayout {
                 Layout.fillWidth: true
-                Text { text: "执行间隔"; color: window.muted; Layout.preferredWidth: 100; font.pixelSize: 11 }
+                Text { text: "执行间隔"; color: window.muted; Layout.preferredWidth: 100; font.pixelSize: 12 }
                 TextField { id: monitorHoursField; Layout.preferredWidth: 90; color: window.ink; inputMethodHints: Qt.ImhDigitsOnly; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                Text { text: "小时"; color: window.muted; font.pixelSize: 11 }
+                Text { text: "小时"; color: window.muted; font.pixelSize: 12 }
                 TextField { id: monitorMinutesField; Layout.preferredWidth: 90; color: window.ink; inputMethodHints: Qt.ImhDigitsOnly; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                Text { text: "分钟"; color: window.muted; font.pixelSize: 11 }
+                Text { text: "分钟"; color: window.muted; font.pixelSize: 12 }
             }
             RowLayout {
                 Layout.fillWidth: true
-                Text { text: "默认排序"; color: window.muted; Layout.preferredWidth: 100; font.pixelSize: 11 }
+                Text { text: "默认排序"; color: window.muted; Layout.preferredWidth: 100; font.pixelSize: 12 }
                 ComboBox { id: monitorSortChooser; Layout.fillWidth: true; model: [{label: "最新发布", value: "latest"}, {label: "综合排序", value: "default"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate; contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             Item { Layout.fillHeight: true }
@@ -6245,8 +6287,8 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 10
-            Text { text: "已选择 " + leadPage.selectedLeadIds.length + " 条线索"; color: window.muted; font.pixelSize: 11 }
-            RowLayout { Layout.fillWidth: true; Text { text: "标签内容"; color: window.muted; Layout.preferredWidth: 80; font.pixelSize: 11 } TextField { id: leadTagField; Layout.fillWidth: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "例如：重点跟进、待补充资料"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } } }
+            Text { text: "已选择 " + leadPage.selectedLeadIds.length + " 条线索"; color: window.muted; font.pixelSize: 12 }
+            RowLayout { Layout.fillWidth: true; Text { text: "标签内容"; color: window.muted; Layout.preferredWidth: 80; font.pixelSize: 12 } TextField { id: leadTagField; Layout.fillWidth: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "例如：重点跟进、待补充资料"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } } }
             RowLayout { Layout.fillWidth: true; Item { Layout.fillWidth: true } AppButton { text: "取消"; onClicked: leadTagDialog.close(); contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } background: Rectangle { radius: 7; color: "transparent"; border.color: window.line } } AppButton { text: "保存标签"; enabled: leadTagField.text.trim().length > 0; onClicked: { backend.tagLeads(leadPage.selectedLeadIds, leadTagField.text); leadPage.selectedLeadIds = []; leadTagDialog.close() } contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter } background: Rectangle { radius: 7; color: parent.enabled ? window.blue : window.panel2 } } }
         }
         onOpened: { leadTagField.text = ""; leadTagField.forceActiveFocus() }
@@ -6369,40 +6411,40 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 12
-            Text { text: "完整复用 1.2：关键词组按词逐个搜索；排序、采集内容和账号均按平台分别设置。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
-            RowLayout { Layout.fillWidth: true; Text { text: "平台"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            Text { text: "完整复用 1.2：关键词组按词逐个搜索；排序、采集内容和账号均按平台分别设置。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
+            RowLayout { Layout.fillWidth: true; Text { text: "平台"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 ComboBox { id: taskPlatformChooser; Layout.fillWidth: true; model: [{label: "抖音", value: "douyin"}, {label: "小红书", value: "xhs"}, {label: "B站", value: "bilibili"}, {label: "微博", value: "weibo"}, {label: "快手", value: "kuaishou"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate; onActivated: taskDialog.resetForPlatform(); contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "搜索关键词"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "搜索关键词"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 TextField { id: taskKeywordField; Layout.fillWidth: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "例如：郑州早教；选择关键词组后自动填入组名"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "关键词组"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "关键词组"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 ComboBox { id: taskGroupChooser; Layout.fillWidth: true; model: taskDialog.keywordGroupModel; textRole: "label"; valueRole: "id"; delegate: darkComboDelegate; onActivated: { if (currentValue > 0) taskKeywordField.text = currentText } contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9; elide: Text.ElideRight } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                AppButton { Layout.preferredWidth: 116; text: "＋ 新建关键词组"; onClicked: keywordGroupDialog.openForCreate(); contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
+                AppButton { Layout.preferredWidth: 116; text: "＋ 新建关键词组"; onClicked: keywordGroupDialog.openForCreate(); contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "搜索排序"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "搜索排序"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 ComboBox { id: taskSortChooser; Layout.fillWidth: true; model: taskDialog.sortOptionsFor(String(taskPlatformChooser.currentValue || "douyin")); textRole: "label"; valueRole: "value"; delegate: darkComboDelegate; contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "采集模式"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "采集模式"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 ComboBox { id: taskCollectModeChooser; Layout.fillWidth: true; model: [{label: "快速（最多100条）", value: "fast"}, {label: "标准（常规采集）", value: "standard"}, {label: "深度（最多10000条）", value: "deep"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate; contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "执行方式"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "执行方式"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 ComboBox { id: taskModeChooser; Layout.fillWidth: true; model: [{label: "单次采集", value: "once"}, {label: "定时增量监控", value: "monitoring"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate; contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             RowLayout { Layout.fillWidth: true; spacing: 10
-                Text { text: "每关键词目标"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+                Text { text: "每关键词目标"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 TextField { id: taskTargetField; Layout.preferredWidth: 125; text: "100"; color: window.ink; palette.placeholderText: window.muted; inputMethodHints: Qt.ImhDigitsOnly; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                Text { text: "每批数量"; color: window.muted; font.pixelSize: 11 }
+                Text { text: "每批数量"; color: window.muted; font.pixelSize: 12 }
                 TextField { id: taskBatchField; Layout.preferredWidth: 90; text: "10"; color: window.ink; palette.placeholderText: window.muted; inputMethodHints: Qt.ImhDigitsOnly; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                Text { text: "冷却秒数"; color: window.muted; font.pixelSize: 11 }
+                Text { text: "冷却秒数"; color: window.muted; font.pixelSize: 12 }
                 TextField { id: taskCooldownField; Layout.preferredWidth: 90; text: "60"; color: window.ink; palette.placeholderText: window.muted; inputMethodHints: Qt.ImhDigitsOnly; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "监控间隔（秒）"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "监控间隔（秒）"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 TextField { id: taskMonitorField; Layout.preferredWidth: 125; text: "3600"; color: window.ink; palette.placeholderText: window.muted; inputMethodHints: Qt.ImhDigitsOnly; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
                 AppCheckBox { id: taskOnlyComments; text: "仅保留有评论"; checked: false }
                 Item { Layout.fillWidth: true }
             }
-            Text { text: "采集内容"; color: window.muted; font.pixelSize: 11 }
+            Text { text: "采集内容"; color: window.muted; font.pixelSize: 12 }
             GridLayout {
                 Layout.fillWidth: true
                 columns: 3
@@ -6419,7 +6461,7 @@ ApplicationWindow {
                     }
                 }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "参与账号"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "参与账号"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 TextField { id: taskAccountsField; Layout.fillWidth: true; readOnly: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "请在下方勾选当前平台已绑定账号"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             GridLayout {
@@ -6440,9 +6482,9 @@ ApplicationWindow {
                     }
                 }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "输出目录"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "输出目录"; color: window.muted; Layout.preferredWidth: 104; font.pixelSize: 12 }
                 TextField { id: taskOutputField; Layout.fillWidth: true; text: "data/exports"; color: window.ink; palette.placeholderText: window.muted; placeholderText: "留空使用默认目录"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                AppButton { Layout.preferredWidth: 86; text: "选择目录"; onClicked: outputFolderDialog.open(); contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 7; color: "transparent"; border.color: "#365174" } }
+                AppButton { Layout.preferredWidth: 86; text: "选择目录"; onClicked: outputFolderDialog.open(); contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: "transparent"; border.color: "#365174" } }
             }
             Item { Layout.fillHeight: true }
             RowLayout { Layout.fillWidth: true; Item { Layout.fillWidth: true }
@@ -6488,14 +6530,14 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 11
-            Text { text: "先创建一份统一内容，之后可以在发布中心分别编辑四个平台版本。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
+            Text { text: "先创建一份统一内容，之后可以在发布中心分别编辑四个平台版本。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
             RowLayout { Layout.fillWidth: true
-                Text { text: "内容标题"; color: window.muted; Layout.preferredWidth: 78; font.pixelSize: 11 }
+                Text { text: "内容标题"; color: window.muted; Layout.preferredWidth: 78; font.pixelSize: 12 }
                 TextField { id: publishTitleField; Layout.fillWidth: true; color: window.ink; placeholderText: "可填写统一标题，后续可按平台修改"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            Text { text: "原始正文"; color: window.muted; font.pixelSize: 11 }
+            Text { text: "原始正文"; color: window.muted; font.pixelSize: 12 }
             TextArea { id: publishBodyField; Layout.fillWidth: true; Layout.fillHeight: true; color: window.ink; wrapMode: TextArea.Wrap; selectByMouse: true; placeholderText: "请输入完整内容，不填入任何平台页面"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-            Text { text: "生成平台版本"; color: window.muted; font.pixelSize: 11 }
+            Text { text: "生成平台版本"; color: window.muted; font.pixelSize: 12 }
             RowLayout { Layout.fillWidth: true; spacing: 12
                 AppCheckBox { text: "抖音"; checked: publishDraftDialog.createDouyin; onToggled: publishDraftDialog.createDouyin = checked }
                 AppCheckBox { text: "小红书"; checked: publishDraftDialog.createXhs; onToggled: publishDraftDialog.createXhs = checked }
@@ -6654,11 +6696,11 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 10
-            Text { text: "保存后可在新建任务中按当前平台选择，关键词会按词逐个搜索。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
+            Text { text: "保存后可在新建任务中按当前平台选择，关键词会按词逐个搜索。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
             RowLayout {
                 visible: keywordGroupDialog.manageMode
                 Layout.fillWidth: true
-                Text { text: "编辑词组"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 11 }
+                Text { text: "编辑词组"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 12 }
                 ComboBox {
                     id: keywordGroupEditChooser
                     Layout.fillWidth: true
@@ -6674,33 +6716,33 @@ ApplicationWindow {
                     Layout.preferredWidth: 92
                     text: "新建词组"
                     onClicked: keywordGroupDialog.startNewGroup()
-                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: parent.hovered ? "#263e63" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                 }
             }
             RowLayout { Layout.fillWidth: true
-                Text { text: "适用平台"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 11 }
+                Text { text: "适用平台"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 12 }
                 ComboBox { id: keywordGroupPlatformChooser; Layout.fillWidth: true; model: [{label: "抖音", value: "douyin"}, {label: "小红书", value: "xhs"}, {label: "B站", value: "bilibili"}, {label: "微博", value: "weibo"}, {label: "快手", value: "kuaishou"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate; contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             RowLayout { Layout.fillWidth: true
-                Text { text: "词组名称"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 11 }
+                Text { text: "词组名称"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 12 }
                 TextField { id: keywordGroupNameField; Layout.fillWidth: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "例如：洗护行业客户"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            Text { text: "关键词设置（多个词可用顿号、逗号、分号或换行分隔）"; color: window.muted; font.pixelSize: 11 }
+            Text { text: "关键词设置（多个词可用顿号、逗号、分号或换行分隔）"; color: window.muted; font.pixelSize: 12 }
             RowLayout { Layout.fillWidth: true
-                Text { text: "核心词"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 11 }
+                Text { text: "核心词"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 12 }
                 TextArea { id: keywordGroupCoreField; Layout.fillWidth: true; Layout.preferredHeight: 58; color: window.ink; palette.placeholderText: window.muted; placeholderText: "必填，例如：京东洗衣、互联网洗衣"; wrapMode: TextArea.Wrap; selectByMouse: true; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             RowLayout { Layout.fillWidth: true
-                Text { text: "同义词"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 11 }
+                Text { text: "同义词"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 12 }
                 TextArea { id: keywordGroupSynonymField; Layout.fillWidth: true; Layout.preferredHeight: 48; color: window.ink; palette.placeholderText: window.muted; placeholderText: "可选，例如：洗衣服务、衣物护理"; wrapMode: TextArea.Wrap; selectByMouse: true; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             RowLayout { Layout.fillWidth: true
-                Text { text: "地区词"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 11 }
+                Text { text: "地区词"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 12 }
                 TextArea { id: keywordGroupRegionField; Layout.fillWidth: true; Layout.preferredHeight: 42; color: window.ink; palette.placeholderText: window.muted; placeholderText: "可选，例如：河南、郑州"; wrapMode: TextArea.Wrap; selectByMouse: true; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             RowLayout { Layout.fillWidth: true
-                Text { text: "排除词"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 11 }
+                Text { text: "排除词"; color: window.muted; Layout.preferredWidth: 92; font.pixelSize: 12 }
                 TextArea { id: keywordGroupExcludeField; Layout.fillWidth: true; Layout.preferredHeight: 42; color: window.ink; palette.placeholderText: window.muted; placeholderText: "可选，不希望搜索的词"; wrapMode: TextArea.Wrap; selectByMouse: true; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             Item { Layout.fillHeight: true }
@@ -6742,7 +6784,7 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 12
-            Text { text: "仅统计今天（" + (backend.diagnosticLogStats.date || "") + "）的后台操作记录"; color: window.muted; font.pixelSize: 11 }
+            Text { text: "仅统计今天（" + (backend.diagnosticLogStats.date || "") + "）的后台操作记录"; color: window.muted; font.pixelSize: 12 }
             RowLayout { Layout.fillWidth: true; spacing: 8
                 Rectangle { Layout.fillWidth: true; height: 72; radius: 9; color: "#183452"; Text { anchors.centerIn: parent; text: "全部\n" + (backend.diagnosticLogStats.total || 0); color: window.blue; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 14 } }
                 Rectangle { Layout.fillWidth: true; height: 72; radius: 9; color: "#173b37"; Text { anchors.centerIn: parent; text: "正常\n" + (backend.diagnosticLogStats.normal || 0); color: window.green; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 14 } }
@@ -6752,10 +6794,10 @@ ApplicationWindow {
             Rectangle { Layout.fillWidth: true; Layout.fillHeight: true; radius: 9; color: window.panel2; border.color: window.line
                 ColumnLayout { anchors.fill: parent; anchors.margins: 14; spacing: 8
                     Text { text: "下一条警告 / 错误"; color: window.ink; font.pixelSize: 13; font.weight: Font.DemiBold }
-                    Text { Layout.fillWidth: true; Layout.fillHeight: true; text: logStatsDialog.currentAlertText(); color: logStatsDialog.currentAlert() ? "#ffcf86" : window.muted; wrapMode: Text.WordWrap; font.pixelSize: 11 }
+                    Text { Layout.fillWidth: true; Layout.fillHeight: true; text: logStatsDialog.currentAlertText(); color: logStatsDialog.currentAlert() ? "#ffcf86" : window.muted; wrapMode: Text.WordWrap; font.pixelSize: 12 }
                     RowLayout { Layout.fillWidth: true; Item { Layout.fillWidth: true }
-                        AppButton { text: "下一条"; enabled: logStatsDialog.alertRows().length > 0; onClicked: { logStatsDialog.alertIndex = (logStatsDialog.alertIndex + 1) % logStatsDialog.alertRows().length } contentItem: Text { text: parent.text; color: parent.enabled ? window.amber : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 7; color: "transparent"; border.color: parent.enabled ? window.amber : window.line } }
-                        AppButton { text: "刷新日志"; onClicked: { backend.refreshDiagnostics(); logStatsDialog.alertIndex = 0 } contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 7; color: window.panel; border.color: parent.hovered ? window.blue : window.line } }
+                        AppButton { text: "下一条"; enabled: logStatsDialog.alertRows().length > 0; onClicked: { logStatsDialog.alertIndex = (logStatsDialog.alertIndex + 1) % logStatsDialog.alertRows().length } contentItem: Text { text: parent.text; color: parent.enabled ? window.amber : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: "transparent"; border.color: parent.enabled ? window.amber : window.line } }
+                        AppButton { text: "刷新日志"; onClicked: { backend.refreshDiagnostics(); logStatsDialog.alertIndex = 0 } contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: window.panel; border.color: parent.hovered ? window.blue : window.line } }
                     }
                 }
             }
@@ -6811,21 +6853,21 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 12
-            Text { text: "普通平台需选择已打开的 BitBrowser 窗口；贴吧使用 API 令牌，不需要窗口。"; color: window.amber; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
-            RowLayout { Layout.fillWidth: true; Text { text: "账号名称"; color: window.muted; Layout.preferredWidth: 90; font.pixelSize: 11 }
+            Text { text: "普通平台需选择已打开的 BitBrowser 窗口；贴吧使用 API 令牌，不需要窗口。"; color: window.amber; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
+            RowLayout { Layout.fillWidth: true; Text { text: "账号名称"; color: window.muted; Layout.preferredWidth: 90; font.pixelSize: 12 }
                 TextField { id: accountNameField; Layout.fillWidth: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "例如：抖音主账号"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "平台"; color: window.muted; Layout.preferredWidth: 90; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "平台"; color: window.muted; Layout.preferredWidth: 90; font.pixelSize: 12 }
                 ComboBox { id: accountPlatformChooser; Layout.fillWidth: true; model: [{label: "抖音", value: "douyin"}, {label: "小红书", value: "xhs"}, {label: "B站", value: "bilibili"}, {label: "微博", value: "weibo"}, {label: "快手", value: "kuaishou"}, {label: "百度贴吧", value: "tieba"}]; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate; onActivated: accountWindowField.text = ""; contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            RowLayout { Layout.fillWidth: true; Text { text: "窗口 ID"; color: window.muted; Layout.preferredWidth: 90; font.pixelSize: 11 }
+            RowLayout { Layout.fillWidth: true; Text { text: "窗口 ID"; color: window.muted; Layout.preferredWidth: 90; font.pixelSize: 12 }
                 ColumnLayout { Layout.fillWidth: true; spacing: 6
                     RowLayout { Layout.fillWidth: true
                         TextField { id: accountWindowField; Layout.fillWidth: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "从下方已打开窗口中选择"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                        AppButton { text: "刷新窗口"; onClicked: backend.inspectBitBrowser(); contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 } background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line } }
+                        AppButton { text: "刷新窗口"; onClicked: backend.inspectBitBrowser(); contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line } }
                     }
                     ComboBox { id: accountWindowChooser; Layout.fillWidth: true; model: backend.diagnosticBitBrowserWindows; textRole: "name"; valueRole: "id"; delegate: darkComboDelegate; onActivated: accountWindowField.text = String(currentValue || ""); contentItem: Text { text: parent.currentIndex >= 0 && parent.displayText ? parent.displayText : "选择已打开的 BitBrowser 窗口"; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9; elide: Text.ElideRight } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
-                    Text { text: accountDialog.windowStatusText(); color: accountDialog.selectedWindowIsOpen() ? window.green : window.muted; font.pixelSize: 10; Layout.fillWidth: true; elide: Text.ElideRight }
+                    Text { text: accountDialog.windowStatusText(); color: accountDialog.selectedWindowIsOpen() ? window.green : window.muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                 }
             }
             Item { Layout.fillHeight: true }
@@ -6875,13 +6917,13 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 12
-            Text { text: "创建后自动打开窗口；登录平台后，再到“添加账号”中选择窗口并保存。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
+            Text { text: "创建后自动打开窗口；登录平台后，再到“添加账号”中选择窗口并保存。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
             RowLayout { Layout.fillWidth: true
-                Text { text: "平台"; color: window.muted; Layout.preferredWidth: 82; font.pixelSize: 11 }
+                Text { text: "平台"; color: window.muted; Layout.preferredWidth: 82; font.pixelSize: 12 }
                 ComboBox { id: createBrowserPlatformChooser; Layout.fillWidth: true; model: createBrowserDialog.platformOptions; textRole: "label"; valueRole: "value"; delegate: darkComboDelegate; contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9 } background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             RowLayout { Layout.fillWidth: true
-                Text { text: "窗口名称"; color: window.muted; Layout.preferredWidth: 82; font.pixelSize: 11 }
+                Text { text: "窗口名称"; color: window.muted; Layout.preferredWidth: 82; font.pixelSize: 12 }
                 TextField { id: createBrowserNameField; Layout.fillWidth: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "可留空，自动按平台和时间命名"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
             Item { Layout.fillHeight: true }
@@ -6914,14 +6956,14 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 10
             Text { text: "确定删除窗口“" + accountsPage.deleteCandidateWindowName + "”吗？"; color: window.ink; font.pixelSize: 13; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-            Text { text: "窗口 ID：" + accountsPage.deleteCandidateWindowId; color: window.muted; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-            Text { text: "这会先关闭窗口，再永久删除 BitBrowser profile，操作不可恢复。只有未绑定账号的窗口可以删除；已绑定窗口请先解除绑定。"; color: window.amber; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            Text { text: "窗口 ID：" + accountsPage.deleteCandidateWindowId; color: window.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            Text { text: "这会先关闭窗口，再永久删除 BitBrowser profile，操作不可恢复。只有未绑定账号的窗口可以删除；已绑定窗口请先解除绑定。"; color: window.amber; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
         }
         footer: RowLayout {
             spacing: 8
             Item { Layout.fillWidth: true }
-            AppButton { text: "取消"; onClicked: browserWindowDeleteDialog.reject(); contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 7; color: "transparent"; border.color: window.line } }
-            AppButton { text: "确认删除"; onClicked: accountsPage.confirmDeleteWindow(); contentItem: Text { text: parent.text; color: "#fff1f3"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 } background: Rectangle { radius: 7; color: "#b95768"; border.color: "#e97583" } }
+            AppButton { text: "取消"; onClicked: browserWindowDeleteDialog.reject(); contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: "transparent"; border.color: window.line } }
+            AppButton { text: "确认删除"; onClicked: accountsPage.confirmDeleteWindow(); contentItem: Text { text: parent.text; color: "#fff1f3"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 } background: Rectangle { radius: 7; color: "#b95768"; border.color: "#e97583" } }
         }
     }
 
@@ -6983,10 +7025,10 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 12
-            Text { text: "模板正文会完整保存；修改模板不会改写已经进入待发送或已回复的历史内容。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 11 }
+            Text { text: "模板正文会完整保存；修改模板不会改写已经进入待发送或已回复的历史内容。"; color: window.muted; wrapMode: Text.WordWrap; Layout.fillWidth: true; font.pixelSize: 12 }
             RowLayout {
                 Layout.fillWidth: true
-                Text { text: "选择模板"; color: window.muted; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                Text { text: "选择模板"; color: window.muted; font.pixelSize: 12; Layout.preferredWidth: 76 }
                 ComboBox {
                     id: dialogTemplateChooser
                     Layout.fillWidth: true
@@ -6995,24 +7037,24 @@ ApplicationWindow {
                     valueRole: "id"
                     delegate: darkComboDelegate
                     onActivated: templateDialog.loadSelectedTemplate()
-                    contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9; elide: Text.ElideRight; font.pixelSize: 11 }
+                    contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9; elide: Text.ElideRight; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
                 }
                 AppButton {
                     text: "＋ 新建模板"
                     Layout.preferredWidth: 94
-                    Layout.preferredHeight: 32
+                    Layout.preferredHeight: window.controlHeight
                     onClicked: templateDialog.newTemplate()
-                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: parent.hovered ? "#203b61" : "transparent"; border.color: parent.hovered ? window.blue : window.line }
                 }
             }
             RowLayout {
                 Layout.fillWidth: true
-                Text { text: "模板名称"; color: window.muted; font.pixelSize: 11; Layout.preferredWidth: 76 }
+                Text { text: "模板名称"; color: window.muted; font.pixelSize: 12; Layout.preferredWidth: 76 }
                 TextField { id: templateIdField; Layout.fillWidth: true; color: window.ink; palette.placeholderText: window.muted; placeholderText: "例如：首轮跟进"; background: Rectangle { radius: 7; color: window.panel2; border.color: window.line } }
             }
-            Text { text: "完整回复内容"; color: window.muted; font.pixelSize: 11 }
+            Text { text: "完整回复内容"; color: window.muted; font.pixelSize: 12 }
             TextArea {
                 id: templateContentField
                 Layout.fillWidth: true
@@ -7026,12 +7068,12 @@ ApplicationWindow {
             }
             RowLayout {
                 Layout.fillWidth: true
-                Text { text: "可用自定义变量"; color: window.muted; font.pixelSize: 11 }
+                Text { text: "可用自定义变量"; color: window.muted; font.pixelSize: 12 }
                 Item { Layout.fillWidth: true }
                 AppButton {
                     text: "＋ 添加变量"
                     onClicked: variableModel.append({"name": "", "value": ""})
-                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    contentItem: Text { text: parent.text; color: window.blue; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: "transparent"; border.color: window.line }
                 }
             }
@@ -7063,24 +7105,24 @@ ApplicationWindow {
                         onTextChanged: if (activeFocus) variableModel.setProperty(index, "value", text)
                         background: Rectangle { radius: 6; color: window.panel2; border.color: window.line }
                     }
-                    Text { text: "{{" + model.name + "}}"; color: window.blue; Layout.preferredWidth: 130; elide: Text.ElideRight; font.pixelSize: 10 }
+                    Text { text: "{{" + model.name + "}}"; color: window.blue; Layout.preferredWidth: 130; elide: Text.ElideRight; font.pixelSize: 12 }
                     AppButton {
                         text: "移除"
                         onClicked: variableModel.remove(index)
-                        contentItem: Text { text: parent.text; color: "#ff9b9b"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
+                        contentItem: Text { text: parent.text; color: "#ff9b9b"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                         background: Rectangle { radius: 6; color: "transparent"; border.color: window.line }
                     }
                 }
             }
             RowLayout {
                 Layout.fillWidth: true
-                Text { text: "系统变量：{{昵称}}、{{平台}}、{{省份}}、{{城市}}、{{产品}}、{{联系方式提示}}"; color: window.muted; font.pixelSize: 10; elide: Text.ElideRight; Layout.fillWidth: true }
-                Text { text: templateDialog.saveStatus; color: templateDialog.saveStatusOk ? window.green : window.amber; font.pixelSize: 10; elide: Text.ElideRight; Layout.preferredWidth: 250 }
+                Text { text: "系统变量：{{昵称}}、{{平台}}、{{省份}}、{{城市}}、{{产品}}、{{联系方式提示}}"; color: window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                Text { text: templateDialog.saveStatus; color: templateDialog.saveStatusOk ? window.green : window.amber; font.pixelSize: 12; elide: Text.ElideRight; Layout.preferredWidth: 250 }
                 AppButton {
                     text: "取消"
                     enabled: !templateDialog.saving
                     onClicked: templateDialog.close()
-                    contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    contentItem: Text { text: parent.text; color: window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: "transparent"; border.color: window.line }
                 }
                 AppButton {
@@ -7095,11 +7137,12 @@ ApplicationWindow {
                         templateDialog.saveStatusOk = true
                         backend.saveTemplate(templateIdField.text, templateContentField.text, variables)
                     }
-                    contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
+                    contentItem: Text { text: parent.text; color: parent.enabled ? "#071224" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
                     background: Rectangle { radius: 7; color: parent.enabled ? window.blue : window.panel2; border.color: window.line }
                 }
             }
         }
     }
+}
 }
 }
