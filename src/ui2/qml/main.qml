@@ -1073,9 +1073,10 @@ ApplicationWindow {
                 id: tasksPage
                 background: Rectangle { color: window.color }
                 property int taskIdWidth: 62
+                property int taskKeywordWidth: 180
                 property int taskPlatformWidth: 116
-                property int taskProgressWidth: 238
-                property int taskStatusWidth: 112
+                property int taskProgressWidth: 280
+                property int taskStatusWidth: 145
                 property int taskActionsWidth: 390
                 property string taskStatusFilter: "all"
                 property int taskAnchorId: 0
@@ -1283,7 +1284,7 @@ ApplicationWindow {
                                 Layout.preferredHeight: 42
                                 spacing: 12
                                  Text { text: "任务编号"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskIdWidth; Layout.minimumWidth: tasksPage.taskIdWidth; Layout.maximumWidth: tasksPage.taskIdWidth; leftPadding: 12 }
-                                 Text { text: "关键词"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true }
+                                 Text { text: "关键词"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskKeywordWidth; Layout.minimumWidth: tasksPage.taskKeywordWidth; Layout.maximumWidth: tasksPage.taskKeywordWidth }
                                  Text { text: "平台"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskPlatformWidth; Layout.minimumWidth: tasksPage.taskPlatformWidth; Layout.maximumWidth: tasksPage.taskPlatformWidth }
                                  Text { text: "采集进度"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskProgressWidth; Layout.minimumWidth: tasksPage.taskProgressWidth; Layout.maximumWidth: tasksPage.taskProgressWidth }
                                  Text { text: "状态"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskStatusWidth; Layout.minimumWidth: tasksPage.taskStatusWidth; Layout.maximumWidth: tasksPage.taskStatusWidth }
@@ -1323,10 +1324,12 @@ ApplicationWindow {
                                          anchors.rightMargin: 0
                                          spacing: 12
                                           Text { text: "#" + modelData.id; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskIdWidth; Layout.minimumWidth: tasksPage.taskIdWidth; Layout.maximumWidth: tasksPage.taskIdWidth }
-                                         ColumnLayout {
-                                             Layout.fillWidth: true
-                                             Layout.alignment: Qt.AlignVCenter
-                                             spacing: 3
+                                          ColumnLayout {
+                                              Layout.preferredWidth: tasksPage.taskKeywordWidth
+                                              Layout.minimumWidth: tasksPage.taskKeywordWidth
+                                              Layout.maximumWidth: tasksPage.taskKeywordWidth
+                                              Layout.alignment: Qt.AlignVCenter
+                                              spacing: 3
                                               Text { text: modelData.keyword; color: window.ink; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 13; font.family: window.uiFontFamily }
                                               Text { text: modelData.keyword_count > 1 ? ("关键词进度：" + (modelData.keyword_queries || []).filter(window.isKeywordFinished).length + " / " + modelData.keyword_count) : "单关键词任务"; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                          }
