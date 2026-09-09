@@ -816,38 +816,38 @@ ApplicationWindow {
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                     ColumnLayout {
                         id: overviewColumn
-                        x: 30; y: 24
-                        width: overviewScroll.width - 60
-                        spacing: 14
+                        x: window.pagePadding; y: window.pagePadding
+                        width: overviewScroll.width - window.pagePadding * 2
+                        spacing: 16
                         RowLayout {
                             Layout.fillWidth: true
                             Text { text: "采集总览"; color: window.ink; font.pixelSize: 26; font.weight: Font.DemiBold }
-                            Text { text: "实时运营驾驶舱"; color: window.muted; font.pixelSize: 12; Layout.leftMargin: 10 }
+                            Text { text: "实时运营驾驶舱"; color: window.muted; font.pixelSize: 13; font.family: window.uiFontFamily; Layout.leftMargin: 10 }
                             Item { Layout.fillWidth: true }
                             Rectangle {
-                                Layout.preferredWidth: 92; Layout.preferredHeight: 30; radius: 15
+                                Layout.preferredWidth: 108; Layout.preferredHeight: window.smallControlHeight; radius: 16
                                 color: backend.connectionText === "后台服务已连接" ? "#123b35" : "#3c3020"
                                 border.color: backend.connectionText === "后台服务已连接" ? "#2b8e76" : window.amber
                                 RowLayout { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 6
                                     Rectangle { width: 7; height: 7; radius: 4; color: backend.connectionText === "后台服务已连接" ? window.green : window.amber }
-                                    Text { text: backend.connectionText === "后台服务已连接" ? "已连接" : "需检查"; color: window.ink; font.pixelSize: 10 }
+                                    Text { text: backend.connectionText === "后台服务已连接" ? "已连接" : "需检查"; color: window.ink; font.pixelSize: 12; font.family: window.uiFontFamily }
                                 }
                             }
-                            Text { text: "最后更新 " + String(backend.beijingNowText || "").slice(0, 16); color: window.muted; font.pixelSize: 10 }
+                            Text { text: "最后更新 " + String(backend.beijingNowText || "").slice(0, 16); color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily }
                             AppButton {
-                                text: "局部刷新"; Layout.preferredWidth: 82; Layout.preferredHeight: 30
+                                text: "局部刷新"; Layout.preferredWidth: 90; Layout.preferredHeight: window.smallControlHeight
                                 onClicked: backend.refresh()
-                                contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
-                                background: Rectangle { radius: 7; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
+                                contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                             }
                             AppButton {
-                                text: "＋ 新建任务"; Layout.preferredWidth: 104; Layout.preferredHeight: 30
+                                text: "＋ 新建任务"; Layout.preferredWidth: 116; Layout.preferredHeight: window.smallControlHeight
                                 onClicked: taskDialog.open()
-                                contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10; font.weight: Font.DemiBold }
-                                background: Rectangle { radius: 7; color: parent.hovered ? "#8bbaff" : window.blue }
+                                contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                                background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#8bbaff" : window.blue }
                             }
                         }
-                        Text { text: "采集、评论、线索与互动状态在同一屏观察；后台推送只更新变化的卡片和行。"; color: window.muted; font.pixelSize: 11 }
+                        Text { text: "采集、评论、线索与互动状态在同一屏观察；后台推送只更新变化的卡片和行。"; color: window.muted; font.pixelSize: 13; font.family: window.uiFontFamily }
                         GridLayout {
                             Layout.fillWidth: true; columns: 4; columnSpacing: 10; rowSpacing: 10
                             Repeater {
@@ -858,18 +858,18 @@ ApplicationWindow {
                                     {label: "待处理", key: "pending_tasks", color: "#f3a62f", hint: "等待开始 / 人工"}
                                 ]
                                 delegate: Rectangle {
-                                    Layout.fillWidth: true; Layout.preferredHeight: 132; radius: 10
-                                    color: "#0e1b2d"; border.color: "#203957"
+                                    Layout.fillWidth: true; Layout.preferredHeight: 144; radius: 12
+                                    color: kpiMouse.containsMouse ? "#162b49" : window.surface; border.color: kpiMouse.containsMouse ? accent : window.line
                                     property color accent: modelData.color
-                                    MouseArea { anchors.fill: parent; hoverEnabled: true; onClicked: window.showPage("tasks") }
-                                    Rectangle { x: 14; y: 14; width: 42; height: 42; radius: 21; color: accent; opacity: 0.16 }
-                                    Text { x: 14; y: 14; width: 42; height: 42; text: modelData.key === "running_tasks" ? "▶" : (modelData.key === "completed_videos" ? "✓" : "⌛"); color: accent; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 19; font.weight: Font.DemiBold }
-                                    Column { x: 70; y: 17; spacing: 2
-                                        Text { text: modelData.label; color: window.muted; font.pixelSize: 11 }
-                                        Text { text: modelData.key === "pending_tasks" ? overviewPage.pendingTasks() : (overviewPage.summary[modelData.key] || 0); color: window.ink; font.pixelSize: 27; font.weight: Font.DemiBold }
-                                        Text { text: modelData.hint; color: accent; font.pixelSize: 9 }
+                                    MouseArea { id: kpiMouse; anchors.fill: parent; hoverEnabled: true; onClicked: window.showPage("tasks") }
+                                    Rectangle { x: 16; y: 16; width: 46; height: 46; radius: 23; color: accent; opacity: 0.16 }
+                                    Loader { x: 27; y: 27; width: 24; height: 24; sourceComponent: lineIconComponent; onLoaded: { item.kind = modelData.key === "running_tasks" ? "tasks" : (modelData.key === "completed_videos" ? "overview" : (modelData.key === "comments" ? "interaction" : "settings")); item.tint = accent } }
+                                    Column { x: 78; y: 18; spacing: 3
+                                        Text { text: modelData.label; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                        Text { text: modelData.key === "pending_tasks" ? overviewPage.pendingTasks() : (overviewPage.summary[modelData.key] || 0); color: window.ink; font.pixelSize: 29; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                                        Text { text: modelData.hint; color: accent; font.pixelSize: 12; font.family: window.uiFontFamily }
                                     }
-                                    Row { x: 16; y: 105; spacing: 3
+                                    Row { x: 18; y: 119; spacing: 3
                                         Repeater { model: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
                                             delegate: Rectangle { width: 4; height: 8 + ((index + Number(overviewPage.summary.comments || 0)) % 6) * 3; radius: 2; color: accent; opacity: 0.45 }
                                         }
@@ -1195,16 +1195,16 @@ ApplicationWindow {
                 }
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 30
-                    spacing: 17
+                    anchors.margins: window.pagePadding
+                    spacing: 20
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { text: "任务中心"; color: window.ink; font.pixelSize: 24; font.weight: Font.Medium }
+                        Text { text: "任务中心"; color: window.ink; font.pixelSize: 26; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
                         Item { Layout.fillWidth: true }
                         ComboBox {
                             id: taskStatusFilterChooser
                             Layout.preferredWidth: 150
-                            Layout.preferredHeight: 34
+                            Layout.preferredHeight: window.controlHeight
                             model: [
                                 {label: "全部状态", value: "all"},
                                 {label: "待采集", value: "pending"},
@@ -1228,28 +1228,28 @@ ApplicationWindow {
                                 tasksPage.taskAnchorId = 0
                                 tasksPage.taskAnchorIndex = -1
                             }
-                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 9; elide: Text.ElideRight; font.pixelSize: 11 }
-                            background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
+                            contentItem: Text { text: parent.displayText; color: window.ink; verticalAlignment: Text.AlignVCenter; leftPadding: 12; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
                         }
                         AppButton {
                             text: "刷新"
                             onClicked: { tasksPage.rememberTaskListPosition(); backend.refresh() }
-                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { radius: 9; color: window.panel2; border.color: window.line }
+                            contentItem: Text { text: parent.text; color: window.ink; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                            background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                         }
                         AppButton {
                             text: "＋ 新建任务"
                             onClicked: taskDialog.open()
-                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
-                            background: Rectangle { radius: 9; color: window.blue }
+                            contentItem: Text { text: parent.text; color: "#071224"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                            background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#8bbaff" : window.blue }
                         }
                     }
-                    Text { text: "单次采集和定时增量监控统一管理 · 状态由后台服务实时维护"; color: window.muted; font.pixelSize: 12 }
+                    Text { text: "单次采集和定时增量监控统一管理 · 状态由后台服务实时维护"; color: window.muted; font.pixelSize: 13; font.family: window.uiFontFamily }
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: 13
-                        color: window.panel
+                        color: window.surface
                         border.color: window.line
                         ColumnLayout {
                             anchors.fill: parent
@@ -1258,9 +1258,9 @@ ApplicationWindow {
                             Rectangle {
                                 visible: tasksPage.taskStatusFilter === "all" && tasksPage.completedTaskRows().length > 0
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 38
-                                color: "#14243a"
-                                radius: 8
+                                Layout.preferredHeight: 42
+                                color: window.surfaceRaised
+                                radius: window.smallRadius
                                 RowLayout {
                                     anchors.fill: parent
                                     anchors.leftMargin: 10
@@ -1271,22 +1271,22 @@ ApplicationWindow {
                                         Layout.preferredHeight: 28
                                         text: tasksPage.showCompletedTasks ? "收起已完成" : "展开已完成"
                                         onClicked: tasksPage.showCompletedTasks = !tasksPage.showCompletedTasks
-                                        contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                        background: Rectangle { radius: 7; color: parent.hovered ? "#263e63" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
+                                        contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                        background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#263e63" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                     }
-                                    Text { text: tasksPage.completedTaskSummary(); color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 11 }
+                                    Text { text: tasksPage.completedTaskSummary(); color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                 }
                             }
                             Item { visible: tasksPage.taskStatusFilter === "all" && tasksPage.completedTaskRows().length > 0; Layout.preferredHeight: 8 }
                             RowLayout {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 38
+                                Layout.preferredHeight: 42
                                 spacing: 12
-                                Text { text: "任务编号"; color: window.muted; Layout.preferredWidth: tasksPage.taskIdWidth; Layout.minimumWidth: tasksPage.taskIdWidth; Layout.maximumWidth: tasksPage.taskIdWidth; leftPadding: 12 }
-                                Text { text: "关键词"; color: window.muted; Layout.fillWidth: true }
-                                Text { text: "平台"; color: window.muted; Layout.preferredWidth: tasksPage.taskPlatformWidth; Layout.minimumWidth: tasksPage.taskPlatformWidth; Layout.maximumWidth: tasksPage.taskPlatformWidth }
-                                Text { text: "采集进度"; color: window.muted; Layout.preferredWidth: tasksPage.taskProgressWidth; Layout.minimumWidth: tasksPage.taskProgressWidth; Layout.maximumWidth: tasksPage.taskProgressWidth }
-                                Text { text: "状态"; color: window.muted; Layout.preferredWidth: tasksPage.taskStatusWidth; Layout.minimumWidth: tasksPage.taskStatusWidth; Layout.maximumWidth: tasksPage.taskStatusWidth }
+                                 Text { text: "任务编号"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskIdWidth; Layout.minimumWidth: tasksPage.taskIdWidth; Layout.maximumWidth: tasksPage.taskIdWidth; leftPadding: 12 }
+                                 Text { text: "关键词"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true }
+                                 Text { text: "平台"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskPlatformWidth; Layout.minimumWidth: tasksPage.taskPlatformWidth; Layout.maximumWidth: tasksPage.taskPlatformWidth }
+                                 Text { text: "采集进度"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskProgressWidth; Layout.minimumWidth: tasksPage.taskProgressWidth; Layout.maximumWidth: tasksPage.taskProgressWidth }
+                                 Text { text: "状态"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskStatusWidth; Layout.minimumWidth: tasksPage.taskStatusWidth; Layout.maximumWidth: tasksPage.taskStatusWidth }
                                 Item { Layout.preferredWidth: tasksPage.taskActionsWidth; Layout.minimumWidth: tasksPage.taskActionsWidth; Layout.maximumWidth: tasksPage.taskActionsWidth }
                             }
                             Rectangle { Layout.fillWidth: true; height: 1; color: window.line }
@@ -1315,20 +1315,20 @@ ApplicationWindow {
                                 onContentYChanged: if (!tasksPage.taskRestoringPosition && Number(contentY || 0) > 0) tasksPage.taskLastScrollY = Number(contentY || 0)
                                 delegate: Rectangle {
                                     width: ListView.view.width
-                                     height: 98
-                                    color: index % 2 === 0 ? "transparent" : "#17273d"
+                                      height: 104
+                                     color: index % 2 === 0 ? "transparent" : window.surfaceRaised
                                      RowLayout {
                                          anchors.fill: parent
                                          anchors.leftMargin: 0
                                          anchors.rightMargin: 0
                                          spacing: 12
-                                         Text { text: "#" + modelData.id; color: window.muted; Layout.preferredWidth: tasksPage.taskIdWidth; Layout.minimumWidth: tasksPage.taskIdWidth; Layout.maximumWidth: tasksPage.taskIdWidth }
+                                          Text { text: "#" + modelData.id; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.preferredWidth: tasksPage.taskIdWidth; Layout.minimumWidth: tasksPage.taskIdWidth; Layout.maximumWidth: tasksPage.taskIdWidth }
                                          ColumnLayout {
                                              Layout.fillWidth: true
                                              Layout.alignment: Qt.AlignVCenter
                                              spacing: 3
-                                             Text { text: modelData.keyword; color: window.ink; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12 }
-                                             Text { text: modelData.keyword_count > 1 ? ("关键词进度：" + (modelData.keyword_queries || []).filter(window.isKeywordFinished).length + " / " + modelData.keyword_count) : "单关键词任务"; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 10 }
+                                              Text { text: modelData.keyword; color: window.ink; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 13; font.family: window.uiFontFamily }
+                                              Text { text: modelData.keyword_count > 1 ? ("关键词进度：" + (modelData.keyword_queries || []).filter(window.isKeywordFinished).length + " / " + modelData.keyword_count) : "单关键词任务"; color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                          }
                                          ColumnLayout {
                                              Layout.preferredWidth: tasksPage.taskPlatformWidth
@@ -1340,7 +1340,7 @@ ApplicationWindow {
                                                  Loader { Layout.preferredWidth: 22; Layout.preferredHeight: 22; sourceComponent: userPlatformIconComponent; onLoaded: item.platform = modelData.platform }
                                                  Text { text: modelData.platform_label; color: window.blue; Layout.fillWidth: true; elide: Text.ElideRight }
                                              }
-                                             Text { text: "账号：" + String(modelData.account_label || "自动分配"); color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 10 }
+                                              Text { text: "账号：" + String(modelData.account_label || "自动分配"); color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                          }
                                          RowLayout {
                                              Layout.preferredWidth: tasksPage.taskProgressWidth
@@ -1370,12 +1370,8 @@ ApplicationWindow {
                                                              onPaint: {
                                                                  var ctx = getContext("2d")
                                                                  ctx.clearRect(0, 0, width, height)
-                                                                 // 按当前已填充长度铺开渐变，低进度时也能看到完整的颜色过渡。
-                                                                 var fill = ctx.createLinearGradient(0, 0, Math.max(width, 1), 0)
-                                                                 fill.addColorStop(0.0, "#4676ff")
-                                                                 fill.addColorStop(0.5, "#1ed4e8")
-                                                                 fill.addColorStop(1.0, "#3fe38b")
-                                                                 ctx.fillStyle = fill
+                                                                  // 进行中使用蓝色，完成后使用绿色；颜色只表达状态，不做装饰渐变。
+                                                                  ctx.fillStyle = String(modelData.status === "done" || modelData.status === "completed" ? window.green : window.blue)
                                                                  var radius = Math.min(6, height / 2)
                                                                  ctx.beginPath()
                                                                  ctx.moveTo(radius, 0)
@@ -1399,10 +1395,10 @@ ApplicationWindow {
                                                  }
                                              }
                                              ColumnLayout { Layout.fillWidth: true; spacing: 2
-                                                 Text { text: (modelData.valid_video_done !== undefined ? modelData.valid_video_done : modelData.video_done) + " / " + (modelData.effective_target_count || modelData.target_count || 0) + " 个有效作品"; color: window.ink; font.pixelSize: 11 }
-                                                  Text { text: Number(modelData.comments || 0) + " 条已采集评论" + (modelData.status === "phase_b_comments" ? " · 正在读取" : "") + " · " + modelData.progress + "%"; color: window.green; font.pixelSize: 10 }
-                                                 Text { text: "起：" + window.taskTimeLabel(modelData.start_at); color: window.muted; font.pixelSize: 9; elide: Text.ElideRight }
-                                                 Text { text: "止：" + window.taskTimeLabel(modelData.end_at); color: window.muted; font.pixelSize: 9; elide: Text.ElideRight }
+                                                  Text { text: (modelData.valid_video_done !== undefined ? modelData.valid_video_done : modelData.video_done) + " / " + (modelData.effective_target_count || modelData.target_count || 0) + " 个有效作品"; color: window.ink; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                   Text { text: Number(modelData.comments || 0) + " 条已采集评论" + (modelData.status === "phase_b_comments" ? " · 正在读取" : "") + " · " + modelData.progress + "%"; color: window.green; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                  Text { text: "起：" + window.taskTimeLabel(modelData.start_at); color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; elide: Text.ElideRight }
+                                                  Text { text: "止：" + window.taskTimeLabel(modelData.end_at); color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; elide: Text.ElideRight }
                                              }
                                          }
                                          ColumnLayout {
@@ -1411,8 +1407,8 @@ ApplicationWindow {
                                              Layout.maximumWidth: tasksPage.taskStatusWidth
                                              Layout.alignment: Qt.AlignVCenter
                                              spacing: 3
-                                             Text { text: window.taskStatusLabel(modelData); color: modelData.status === "failed" ? window.red : window.muted; Layout.fillWidth: true; elide: Text.ElideRight }
-                                             Text { visible: String(modelData.error_reason || "") !== ""; text: String(modelData.error_reason || ""); color: window.amber; Layout.fillWidth: true; maximumLineCount: 2; wrapMode: Text.WordWrap; elide: Text.ElideRight; font.pixelSize: 9 }
+                                              Text { text: window.taskStatusLabel(modelData); color: modelData.status === "failed" ? window.danger : window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                              Text { visible: String(modelData.error_reason || "") !== ""; text: String(modelData.error_reason || ""); color: window.amber; Layout.fillWidth: true; maximumLineCount: 2; wrapMode: Text.WordWrap; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                          }
                                          RowLayout {
                                              Layout.preferredWidth: tasksPage.taskActionsWidth
@@ -1429,47 +1425,47 @@ ApplicationWindow {
                                                     else if (window.canResumeStatus(modelData.status)) backend.resumeTask(modelData.id)
                                                     else if (modelData.status === "pending") backend.startTask(modelData.id)
                                                 }
-                                                contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
-                                                background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
+                                                 contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                 background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                             }
                                              AppButton {
                                                 Layout.preferredWidth: 50
                                                 text: "停止"
                                                 enabled: window.isRunningStatus(modelData.status) || modelData.status === "paused"
                                                 onClicked: { tasksPage.rememberTaskListPosition(modelData.id); backend.stopTask(modelData.id) }
-                                                contentItem: Text { text: parent.text; color: parent.enabled ? "#f08b8b" : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12 }
-                                                background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
+                                                 contentItem: Text { text: parent.text; color: parent.enabled ? window.amber : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                 background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#3b3020" : window.panel2; border.color: parent.hovered ? window.amber : window.line }
                                             }
                                             AppButton {
                                                 Layout.preferredWidth: 50
                                                 text: "导出"
                                                 enabled: window.canExportTaskStatus(modelData.status)
                                                 onClicked: { tasksPage.rememberTaskListPosition(modelData.id); backend.exportTask(modelData.id) }
-                                                contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                                background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
+                                                 contentItem: Text { text: parent.text; color: parent.enabled ? window.blue : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                 background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                             }
                                             AppButton {
                                                 Layout.preferredWidth: 50
                                                 text: "目录"
                                                 enabled: window.canOpenTaskFolderStatus(modelData.status)
                                                 onClicked: { tasksPage.rememberTaskListPosition(modelData.id); backend.openTaskFolder(modelData.id) }
-                                                contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                                background: Rectangle { radius: 7; color: window.panel2; border.color: window.line }
+                                                 contentItem: Text { text: parent.text; color: parent.enabled ? window.ink : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                 background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                             }
                                             AppButton {
                                                 Layout.preferredWidth: 50
                                                 text: tasksPage.deletingTaskId === Number(modelData.id) ? "删除中…" : "删除"
                                                 enabled: tasksPage.deletingTaskId === 0
                                                 onClicked: tasksPage.requestDelete(modelData)
-                                                contentItem: Text { text: parent.text; color: parent.enabled ? "#ff9b9b" : "#7187a3"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11 }
-                                                background: Rectangle { radius: 7; color: parent.hovered && parent.enabled ? "#3a2633" : window.panel2; border.color: parent.hovered && parent.enabled ? "#e97583" : window.line }
+                                                 contentItem: Text { text: parent.text; color: parent.enabled ? window.danger : "#7187a3"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                 background: Rectangle { radius: window.smallRadius; color: parent.hovered && parent.enabled ? "#3a2633" : window.panel2; border.color: parent.hovered && parent.enabled ? window.danger : window.line }
                                             }
                                             AppButton {
                                                 Layout.preferredWidth: 78
                                                 text: modelData.monitoring_rule && modelData.monitoring_rule.enabled ? "监控中" : "监控设置"
                                                 onClicked: { tasksPage.rememberTaskListPosition(modelData.id); monitorDialog.openFor(modelData) }
-                                                contentItem: Text { text: parent.text; color: parent.enabled ? window.green : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 10 }
-                                                background: Rectangle { radius: 7; color: window.panel2; border.color: parent.hovered ? window.blue : window.line }
+                                                 contentItem: Text { text: parent.text; color: parent.enabled ? window.green : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                 background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#203857" : window.panel2; border.color: parent.hovered ? window.blue : window.line }
                                             }
                                         }
                                     }
