@@ -15,7 +15,8 @@ ApplicationWindow {
     height: 1000
     minimumWidth: 1100
     minimumHeight: 720
-    property string appVersion: "2.1.1"
+    // 2.2 UI Polish 测试样本：版本号只用于界面标识，正式发布前仍需同步发布构建号。
+    property string appVersion: "2.2.0"
     title: "多平台采集工作台 " + appVersion
     color: "#0b1220"
 
@@ -27,6 +28,17 @@ ApplicationWindow {
     property color blue: "#6ea7ff"
     property color green: "#45d5a1"
     property color amber: "#f0b75a"
+    property color danger: "#ef7180"
+    property color surface: "#101b2d"
+    property color surfaceRaised: "#192a42"
+    property color sectionLabel: "#7890ad"
+    property string uiFontFamily: Qt.platform.os === "osx" ? "PingFang SC" : "Microsoft YaHei UI"
+    property int sidebarWidth: 204
+    property int pagePadding: 24
+    property int controlHeight: 36
+    property int smallControlHeight: 32
+    property int smallRadius: 7
+    property int mediumRadius: 9
 
     // 统一 Qt Quick Controls 的控件和弹出层调色板；否则 ComboBox 弹层会
     // 回退到系统白底，与工作台深色主题不一致。
@@ -133,11 +145,12 @@ ApplicationWindow {
     // 所有操作按钮共用同一套悬停反馈，避免用户无法判断当前控件是否被选中。
     component AppButton: Button {
         id: appButton
+        implicitHeight: window.controlHeight
         hoverEnabled: true
         HoverHandler { cursorShape: Qt.PointingHandCursor }
         Rectangle {
             anchors.fill: parent
-            radius: 7
+            radius: window.smallRadius
             color: "transparent"
             border.color: appButton.enabled && appButton.hovered ? window.blue : "transparent"
             border.width: appButton.enabled && appButton.hovered ? 1 : 0
@@ -176,7 +189,8 @@ ApplicationWindow {
             verticalAlignment: Text.AlignVCenter
             wrapMode: Text.WordWrap
             elide: Text.ElideRight
-            font.pixelSize: 11
+            font.pixelSize: 12
+            font.family: window.uiFontFamily
         }
     }
 
@@ -201,7 +215,8 @@ ApplicationWindow {
                 color: "#f2f7ff"
                 verticalAlignment: Text.AlignVCenter
                 elide: Text.ElideRight
-                font.pixelSize: 11
+                font.pixelSize: 12
+                font.family: window.uiFontFamily
             }
             background: Rectangle {
                 color: parent.highlighted ? "#31518a" : "transparent"
@@ -410,13 +425,13 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
         Rectangle {
-            Layout.preferredWidth: 216
+            Layout.preferredWidth: window.sidebarWidth
             Layout.fillHeight: true
             color: "#0b1220"
             border.color: window.line
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 14
+                anchors.margins: 16
                 spacing: 6
                 Rectangle {
                     Layout.fillWidth: true
@@ -444,8 +459,8 @@ ApplicationWindow {
                         Column {
                             Layout.fillWidth: true
                             spacing: 2
-                            Text { text: "采集与发布"; color: window.ink; font.pixelSize: 16; font.weight: Font.DemiBold }
-                            Text { text: window.appVersion; color: window.blue; font.pixelSize: 10 }
+                            Text { text: "采集与发布"; color: window.ink; font.pixelSize: 16; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                            Text { text: window.appVersion; color: window.blue; font.pixelSize: 12; font.family: window.uiFontFamily }
                         }
                     }
                 }
@@ -453,9 +468,9 @@ ApplicationWindow {
                 // 页面混在采集页签中造成误操作。
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 38
-                    radius: 9
-                    color: "#101b2d"
+                    Layout.preferredHeight: window.controlHeight
+                    radius: window.mediumRadius
+                    color: window.surface
                     border.color: window.line
                     RowLayout {
                         anchors.fill: parent
@@ -466,20 +481,20 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             onClicked: window.switchWorkspace("collect")
-                            contentItem: Text { text: parent.text; color: window.workspaceMode === "collect" ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11; font.weight: window.workspaceMode === "collect" ? Font.DemiBold : Font.Normal }
-                            background: Rectangle { radius: 7; color: window.workspaceMode === "collect" ? "#274b83" : (parent.hovered ? "#182b49" : "transparent"); border.color: window.workspaceMode === "collect" ? "#4776aa" : "transparent" }
+                            contentItem: Text { text: parent.text; color: window.workspaceMode === "collect" ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily; font.weight: window.workspaceMode === "collect" ? Font.DemiBold : Font.Normal }
+                            background: Rectangle { radius: window.smallRadius; color: window.workspaceMode === "collect" ? "#274b83" : (parent.hovered ? "#182b49" : "transparent"); border.color: window.workspaceMode === "collect" ? "#4776aa" : "transparent" }
                         }
                         AppButton {
                             text: "发布"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             onClicked: window.switchWorkspace("publish")
-                            contentItem: Text { text: parent.text; color: window.workspaceMode === "publish" ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 11; font.weight: window.workspaceMode === "publish" ? Font.DemiBold : Font.Normal }
-                            background: Rectangle { radius: 7; color: window.workspaceMode === "publish" ? "#274b83" : (parent.hovered ? "#182b49" : "transparent"); border.color: window.workspaceMode === "publish" ? "#4776aa" : "transparent" }
+                            contentItem: Text { text: parent.text; color: window.workspaceMode === "publish" ? window.ink : window.muted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily; font.weight: window.workspaceMode === "publish" ? Font.DemiBold : Font.Normal }
+                            background: Rectangle { radius: window.smallRadius; color: window.workspaceMode === "publish" ? "#274b83" : (parent.hovered ? "#182b49" : "transparent"); border.color: window.workspaceMode === "publish" ? "#4776aa" : "transparent" }
                         }
                     }
                 }
-                Text { visible: window.workspaceMode === "collect"; text: "工作区"; color: "#60748f"; font.pixelSize: 11; Layout.leftMargin: 10; Layout.topMargin: 3; Layout.bottomMargin: 3 }
+                Text { visible: window.workspaceMode === "collect"; text: "工作区"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.leftMargin: 10; Layout.topMargin: 3; Layout.bottomMargin: 3 }
                 Repeater {
                     visible: window.workspaceMode === "collect"
                     model: [
@@ -504,13 +519,14 @@ ApplicationWindow {
                                 text: modelData.key === "tasks" ? window.overviewValue("tasks") : (modelData.key === "leads" ? window.overviewValue("leads") : (modelData.key === "interaction" ? window.overviewValue("interactions") : ""))
                                 visible: text !== "" && text !== "0"
                                 color: window.ink
-                                font.pixelSize: 10
+                                font.pixelSize: 12
+                                font.family: window.uiFontFamily
                             }
                         }
                         background: Rectangle { radius: 9; color: backend.currentPage === modelData.key ? "#182748" : "transparent"; border.color: backend.currentPage === modelData.key ? "#314a83" : "transparent" }
                     }
                 }
-                Text { visible: window.workspaceMode === "publish"; text: "发布工作区"; color: "#60748f"; font.pixelSize: 11; Layout.leftMargin: 10; Layout.topMargin: 10; Layout.bottomMargin: 3 }
+                Text { visible: window.workspaceMode === "publish"; text: "发布工作区"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.leftMargin: 10; Layout.topMargin: 10; Layout.bottomMargin: 3 }
                 Repeater {
                     visible: window.workspaceMode === "publish"
                     model: [
@@ -529,12 +545,12 @@ ApplicationWindow {
                             spacing: 12
                             Loader { Layout.preferredWidth: 24; Layout.preferredHeight: 24; sourceComponent: lineIconComponent; onLoaded: { item.kind = modelData.icon; item.tint = window.blue } }
                             Text { text: modelData.label; color: publishPage.publishTab === modelData.key ? window.ink : window.muted; Layout.fillWidth: true; verticalAlignment: Text.AlignVCenter; font.pixelSize: 13 }
-                            Text { visible: modelData.key === "messages" && backend.publishMessageUnread > 0; text: backend.publishMessageUnread; color: window.ink; font.pixelSize: 10 }
+                            Text { visible: modelData.key === "messages" && backend.publishMessageUnread > 0; text: backend.publishMessageUnread; color: window.ink; font.pixelSize: 12; font.family: window.uiFontFamily }
                         }
                         background: Rectangle { radius: 9; color: publishPage.publishTab === modelData.key ? "#182748" : "transparent"; border.color: publishPage.publishTab === modelData.key ? "#314a83" : "transparent" }
                     }
                 }
-                Text { visible: window.workspaceMode === "collect"; text: "管理"; color: "#60748f"; font.pixelSize: 11; Layout.leftMargin: 10; Layout.topMargin: 18; Layout.bottomMargin: 3 }
+                Text { visible: window.workspaceMode === "collect"; text: "管理"; color: window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.leftMargin: 10; Layout.topMargin: 18; Layout.bottomMargin: 3 }
                 AppButton {
                     // 数据分析已从工作台导航移除；保留页面实现仅用于兼容旧状态数据。
                     visible: false
@@ -589,61 +605,33 @@ ApplicationWindow {
                     }
                     background: Rectangle { radius: 9; color: parent.hovered ? "#182748" : "transparent"; border.color: parent.hovered ? "#314a83" : "transparent" }
                 }
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 148
-                    Layout.topMargin: 12
-                    radius: 10
-                    color: "#101b2d"
-                    border.color: window.line
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 5
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Text { text: "运行日志"; color: window.ink; font.pixelSize: 11; font.weight: Font.Medium; Layout.fillWidth: true }
-                            Text { text: "实时"; color: window.green; font.pixelSize: 10 }
-                        }
-                        ListView {
-                            id: sidebarLogList
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            clip: true
-                            spacing: 1
-                            model: backend.diagnosticLogs
-                            onCountChanged: if (count > 0) positionViewAtEnd()
-                            delegate: Text {
-                                width: sidebarLogList.width
-                                height: 22
-                                text: "[" + String(modelData.timestamp || "").slice(-8) + "] " + String(modelData.message || "")
-                                color: modelData.level === "error" ? "#ff9b9b" : (String(modelData.message || "").indexOf("人工") >= 0 ? window.amber : window.muted)
-                                elide: Text.ElideRight
-                                verticalAlignment: Text.AlignVCenter
-                                font.pixelSize: 9
-                            }
-                        }
-                    }
-                }
                 Item { Layout.fillHeight: true }
                 Rectangle {
+                    id: serviceStatusCard
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 84
-                    radius: 10
-                    color: "#111d30"
-                    border.color: window.line
+                    Layout.preferredHeight: 92
+                    radius: window.mediumRadius
+                    color: serviceStatusMouse.containsMouse ? "#182748" : window.surface
+                    border.color: serviceStatusMouse.containsMouse ? window.blue : window.line
+                    MouseArea {
+                        id: serviceStatusMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: window.showPage("diagnostics")
+                    }
                     ColumnLayout {
                         anchors.fill: parent
                         anchors.margins: 12
-                        spacing: 6
+                        spacing: 7
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 7
                             Rectangle { width: 7; height: 7; radius: 4; color: backend.connectionText === "后台服务已连接" ? window.green : window.amber }
-                            Text { text: backend.connectionText; color: window.ink; font.pixelSize: 11; Layout.fillWidth: true }
+                            Text { text: backend.connectionText; color: window.ink; font.pixelSize: 12; font.family: window.uiFontFamily; Layout.fillWidth: true }
                         }
-                        Text { text: "六个平台适配器"; color: window.muted; font.pixelSize: 10 }
-                        Text { text: "后台服务实时维护"; color: window.muted; font.pixelSize: 10 }
+                        Text { text: "六个平台适配器 · 后台服务实时维护"; color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; elide: Text.ElideRight; Layout.fillWidth: true }
+                        Text { text: "点击查看设置与诊断"; color: serviceStatusMouse.containsMouse ? window.blue : window.sectionLabel; font.pixelSize: 12; font.family: window.uiFontFamily }
                     }
                 }
             }
@@ -665,12 +653,11 @@ ApplicationWindow {
                 border.color: window.line
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: 26
-                    anchors.rightMargin: 26
+                    anchors.leftMargin: window.pagePadding
+                    anchors.rightMargin: window.pagePadding
                     spacing: 16
-                    Text { text: backend.pageLabel; color: window.ink; font.pixelSize: 15; font.weight: Font.DemiBold }
-                    Text { text: "/  全部结果"; color: window.muted; font.pixelSize: 12 }
-                    Text { visible: backend.lastError !== ""; text: backend.lastError; color: "#ff9b9b"; Layout.preferredWidth: 250; elide: Text.ElideRight; font.pixelSize: 10 }
+                    Text { text: backend.pageLabel; color: window.ink; font.pixelSize: 22; font.family: window.uiFontFamily; font.weight: Font.DemiBold }
+                    Text { visible: backend.lastError !== ""; text: backend.lastError; color: window.danger; Layout.preferredWidth: 250; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                     Item { Layout.fillWidth: true }
                     AppButton {
                         id: personalCenterButton
