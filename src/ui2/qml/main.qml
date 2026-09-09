@@ -1342,11 +1342,12 @@ ApplicationWindow {
                                              }
                                               Text { text: "账号：" + String(modelData.account_label || "自动分配"); color: window.muted; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
                                          }
-                                         RowLayout {
-                                             Layout.preferredWidth: tasksPage.taskProgressWidth
-                                             Layout.minimumWidth: tasksPage.taskProgressWidth
-                                             Layout.maximumWidth: tasksPage.taskProgressWidth
-                                             spacing: 9
+                                          RowLayout {
+                                              Layout.preferredWidth: tasksPage.taskProgressWidth
+                                              Layout.minimumWidth: tasksPage.taskProgressWidth
+                                              Layout.maximumWidth: tasksPage.taskProgressWidth
+                                              Layout.alignment: Qt.AlignVCenter
+                                              spacing: 9
                                              Item {
                                                  Layout.preferredWidth: 118
                                                  Layout.preferredHeight: 12
@@ -1394,12 +1395,16 @@ ApplicationWindow {
                                                      onProgressRatioChanged: taskProgressCanvas.requestPaint()
                                                  }
                                              }
-                                             ColumnLayout { Layout.fillWidth: true; spacing: 2
-                                                  Text { text: (modelData.valid_video_done !== undefined ? modelData.valid_video_done : modelData.video_done) + " / " + (modelData.effective_target_count || modelData.target_count || 0) + " 个有效作品"; color: window.ink; font.pixelSize: 12; font.family: window.uiFontFamily }
-                                                   Text { text: Number(modelData.comments || 0) + " 条已采集评论" + (modelData.status === "phase_b_comments" ? " · 正在读取" : "") + " · " + modelData.progress + "%"; color: window.green; font.pixelSize: 12; font.family: window.uiFontFamily }
-                                                  Text { text: "起：" + window.taskTimeLabel(modelData.start_at); color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; elide: Text.ElideRight }
-                                                  Text { text: "止：" + window.taskTimeLabel(modelData.end_at); color: window.muted; font.pixelSize: 12; font.family: window.uiFontFamily; elide: Text.ElideRight }
-                                             }
+                                              ColumnLayout {
+                                                  Layout.fillWidth: true
+                                                  Layout.minimumWidth: 0
+                                                  spacing: 2
+                                                  clip: true
+                                                  Text { text: (modelData.valid_video_done !== undefined ? modelData.valid_video_done : modelData.video_done) + " / " + (modelData.effective_target_count || modelData.target_count || 0) + " 个有效作品"; color: window.ink; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                  Text { text: Number(modelData.comments || 0) + " 条已采集评论" + (modelData.status === "phase_b_comments" ? " · 正在读取" : "") + " · " + modelData.progress + "%"; color: window.green; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                  Text { text: "起：" + window.taskTimeLabel(modelData.start_at); color: window.muted; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                                  Text { text: "止：" + window.taskTimeLabel(modelData.end_at); color: window.muted; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight; font.pixelSize: 12; font.family: window.uiFontFamily }
+                                              }
                                          }
                                          ColumnLayout {
                                              Layout.preferredWidth: tasksPage.taskStatusWidth
