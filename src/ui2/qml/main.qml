@@ -1078,6 +1078,7 @@ ApplicationWindow {
                     function onViewChanged() { overviewTrendCanvas.requestPaint(); overviewDonutCanvas.requestPaint() }
                 }
             }
+        }
 
             Page {
                 id: tasksPage
@@ -4807,6 +4808,8 @@ ApplicationWindow {
             }
         }
     }
+    }
+    }
 
     Connections {
         target: backend
@@ -6790,8 +6793,6 @@ ApplicationWindow {
         }
     }
 
-    }
-
     Dialog {
         id: logStatsDialog
         modal: true
@@ -7179,6 +7180,4 @@ ApplicationWindow {
             }
         }
     }
-}
-}
 }
