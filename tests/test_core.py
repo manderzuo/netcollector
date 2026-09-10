@@ -153,6 +153,12 @@ class CoreTests(unittest.TestCase):
             time.sleep(.03)
         self.fail(f"任务 {task_id} 未进入 {statuses}")
 
+    def test_process_alive_treats_invalid_windows_handle_as_dead(self):
+        # 强制结束 GUI 后，Windows 可能把 os.kill(pid, 0) 报成 SystemError，
+        # 旧租约清理必须把它视为进程已结束，不能阻断 Scheduler 启动。
+        with patch("scheduler.os.kill", side_effect=SystemError("WinError 6")):
+            self.assertFalse(Scheduler._process_alive(12345))
+
     def test_legacy_foreign_key_and_null_comment_dedup(self):
         conn = sqlite3.connect(self.db_path)
         conn.executescript("""
