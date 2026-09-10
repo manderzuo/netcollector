@@ -589,13 +589,13 @@ class Scheduler:
             return False
         try:
             os.kill(pid, 0)
+        except PermissionError:
+            return True
         except (OSError, ProcessLookupError, SystemError, ValueError, OverflowError):
             # Windows 在强制结束旧 GUI/浏览器后，极少数 Python 运行时会把
             # 无效进程句柄包装成 SystemError（底层仍是 WinError 6）。
             # 这里统一按“租约进程已结束”处理，不能让启动阶段崩溃。
             return False
-        except PermissionError:
-            return True
         return True
 
     @classmethod

@@ -159,6 +159,10 @@ class CoreTests(unittest.TestCase):
         with patch("scheduler.os.kill", side_effect=SystemError("WinError 6")):
             self.assertFalse(Scheduler._process_alive(12345))
 
+    def test_process_alive_treats_permission_denied_as_alive(self):
+        with patch("scheduler.os.kill", side_effect=PermissionError("access denied")):
+            self.assertTrue(Scheduler._process_alive(12345))
+
     def test_legacy_foreign_key_and_null_comment_dedup(self):
         conn = sqlite3.connect(self.db_path)
         conn.executescript("""
