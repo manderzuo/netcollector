@@ -263,31 +263,27 @@ function Start-Application {
     $process = $null
     $launcher = Join-Path $AppRoot 'launcher.ps1'
     $bundledExe = Join-Path $AppRoot '多平台采集工作台.exe'
-    if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+    $bundledRuntime = Join-Path $AppRoot 'runtime'
+    $gui = Join-Path $AppRoot 'src\ui2\default_app.py'
+    $bootstrap = Join-Path $AppRoot 'runtime_bootstrap.ps1'
+
+    if ((Test-Path -LiteralPath $bundledExe -PathType Leaf) -and
+        (Test-Path -LiteralPath $bundledRuntime -PathType Container)) {
+        $process = Start-Process -FilePath $bundledExe -WorkingDirectory $AppRoot -PassThru
+    } elseif ((Test-Path -LiteralPath $gui -PathType Leaf) -and
+              (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
+        . $bootstrap
+        $python = Ensure-QmlRuntime $AppRoot
+        $pythonWindowed = Get-QmlWindowedPython $python
+        $process = Start-Process -FilePath $pythonWindowed -ArgumentList @($gui) -WorkingDirectory $AppRoot -WindowStyle Hidden -PassThru
+    } elseif (Test-Path -LiteralPath $launcher -PathType Leaf) {
+        # Keep a compatibility fallback for old installations that have not
+        # received the new source launcher yet.
         $process = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher
         ) -WorkingDirectory $AppRoot -WindowStyle Hidden -PassThru
-    } elseif (Test-Path -LiteralPath $bundledExe -PathType Leaf) {
-        $process = Start-Process -FilePath $bundledExe -WorkingDirectory $AppRoot -PassThru
     } else {
-        # Development/source installations do not ship launcher.ps1. Start the
-        # same QML entry directly so the update can still restart reliably.
-        $gui = Join-Path $AppRoot 'src\ui2\default_app.py'
-        $pythonCandidates = @(
-            (Join-Path $AppRoot '.venv\Scripts\pythonw.exe'),
-            (Join-Path $AppRoot '.venv\Scripts\python.exe'),
-            (Join-Path $AppRoot 'runtime\python.exe')
-        )
-        $python = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-        if (-not $python) {
-            $pythonCommand = Get-Command pythonw.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $pythonCommand) { $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1 }
-            if ($pythonCommand) { $python = $pythonCommand.Path }
-        }
-        if (-not (Test-Path -LiteralPath $gui -PathType Leaf) -or -not $python) {
-            throw 'Restart target was not found: launcher, bundled EXE or source GUI.'
-        }
-        $process = Start-Process -FilePath $python -ArgumentList @($gui) -WorkingDirectory $AppRoot -WindowStyle Hidden -PassThru
+        throw 'Restart target was not found: bundled EXE, QML entry or launcher.'
     }
     if (-not $process) { throw 'The application restart process could not be started.' }
     Write-UpdateLog ('restart_started pid=' + $process.Id)
@@ -333,8 +329,8 @@ function Update-Application($Manifest) {
         Write-UpdateLog ("package_shape=" + $(if ($isBundlePackage) { 'bundled' } else { 'source' }))
         Set-ProgressState 62 (Decode-Text '5q2j5Zyo5aSH5Lu95pys5Zyw56iL5bqP') ''
 
-        # User data, local configuration and the virtual environment are never replaced.
-        $preserve = if ($isBundlePackage) { @('data', 'logs') } else { @('data', 'config', '.venv', 'logs') }
+        # User data, local configuration and managed runtimes are never replaced.
+        $preserve = if ($isBundlePackage) { @('data', 'logs') } else { @('data', 'config', '.venv', '.runtime', 'logs') }
         $preservedExisting = @($preserve | Where-Object {
             Test-Path -LiteralPath (Join-Path $AppRoot $_)
         })
@@ -349,6 +345,18 @@ function Update-Application($Manifest) {
         Set-ProgressState 76 (Decode-Text '5q2j5Zyo5pu/5o2i56iL5bqP5paH5Lu2') ''
         foreach ($item in $managed) {
             Copy-Item -LiteralPath $item.FullName -Destination $AppRoot -Recurse -Force
+        }
+
+        if (-not $isBundlePackage) {
+            Set-ProgressState 82 'Preparing QML runtime' 'Checking PySide6 and pip...'
+            $bootstrap = Join-Path $AppRoot 'runtime_bootstrap.ps1'
+            if (-not (Test-Path -LiteralPath $bootstrap -PathType Leaf)) {
+                throw 'runtime_bootstrap.ps1 is missing from the update package.'
+            }
+            . $bootstrap
+            $runtimePython = Ensure-QmlRuntime $AppRoot
+            Write-UpdateLog ('runtime_ready python=' + $runtimePython)
+            Set-ProgressState 89 'QML runtime ready' 'PySide6 import check passed.'
         }
 
         $installedVersion = Read-TextFile $VersionPath ''

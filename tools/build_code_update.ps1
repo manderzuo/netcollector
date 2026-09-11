@@ -33,7 +33,11 @@ foreach ($rootName in @('src', 'assets', 'lib')) {
     Get-ChildItem -LiteralPath $targetPath -Recurse -Force -Directory -Filter '__pycache__' | Sort-Object FullName -Descending | Remove-Item -Recurse -Force
 }
 
-foreach ($fileName in @('VERSION.txt', 'BUILD_ID.txt', 'requirements.txt', 'requirements-v2.txt', 'monitor_gui.ps1', 'update.ps1')) {
+foreach ($fileName in @(
+    'VERSION.txt', 'BUILD_ID.txt', 'requirements.txt', 'requirements-v2.txt',
+    'monitor_gui.ps1', 'update.ps1', 'runtime_bootstrap.ps1', 'launcher.ps1',
+    'start.bat', 'install_environment.ps1'
+)) {
     $sourcePath = Join-Path $sourceFull $fileName
     if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
         Copy-Item -LiteralPath $sourcePath -Destination $payload -Force

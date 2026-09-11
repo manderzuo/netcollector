@@ -1,4 +1,3 @@
-# 2.0 专用依赖。1.2 继续使用 requirements.txt，不强制安装 Qt。
+# Dedicated dependencies for the QML UI.
 -r requirements.txt
 PySide6>=6.7,<7
-

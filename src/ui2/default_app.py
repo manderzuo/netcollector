@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""2.2.3 默认桌面入口。
+"""2.2.4 默认桌面入口。
 
 这个入口把 QML 界面和本地后台服务装配在同一个进程中：后台服务仍然通过
 本机回环 TCP 与界面通信，但不再要求用户先手动启动 ``backend_app.py``。
@@ -25,7 +25,7 @@ try:
     from PySide6.QtQuickControls2 import QQuickStyle
 except ImportError as exc:  # pragma: no cover - 取决于运行环境
     raise SystemExit(
-        "2.2.3 界面需要 PySide6，请先安装 requirements-v2.txt；"
+        "2.2.4 界面需要 PySide6，请先安装 requirements.txt；"
         "旧版入口仍可使用。"
     ) from exc
 

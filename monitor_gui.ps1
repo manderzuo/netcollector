@@ -87,6 +87,27 @@ function Test-Alive([int]$pid) {
 
 function Start-Gui {
     if (-not (Test-Path $guiPy)) { return $null }
+    if (-not $Legacy) {
+        $bootstrap = Join-Path $root 'runtime_bootstrap.ps1'
+        if (Test-Path -LiteralPath $bootstrap -PathType Leaf) {
+            try {
+                . $bootstrap
+                $runtime = Ensure-QmlRuntime $root
+                $runtime = Get-QmlWindowedPython $runtime
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = $runtime
+                $psi.Arguments = "`"$guiPy`""
+                $psi.WorkingDirectory = $root
+                $psi.UseShellExecute = $false
+                $psi.CreateNoWindow = $true
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                return $proc.Id
+            } catch {
+                Write-Alert "QML运行环境准备失败: $($_.Exception.Message)"
+                return $null
+            }
+        }
+    }
     $venvPythonw = Join-Path $root '.venv\Scripts\pythonw.exe'
     $venvPython = Join-Path $root '.venv\Scripts\python.exe'
     $runtime = if (Test-Path $venvPythonw) { $venvPythonw } elseif (Test-Path $venvPython) { $venvPython } else { $null }

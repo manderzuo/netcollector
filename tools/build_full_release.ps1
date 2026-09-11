@@ -40,7 +40,8 @@ foreach ($rootName in @('src', 'assets', 'lib')) {
 
 foreach ($fileName in @(
     'README.md', 'VERSION.txt', 'BUILD_ID.txt', 'requirements.txt', 'requirements-v2.txt',
-    'monitor_gui.ps1', 'update.ps1', 'config\update.json'
+    'monitor_gui.ps1', 'update.ps1', 'runtime_bootstrap.ps1', 'launcher.ps1',
+    'start.bat', 'install_environment.ps1', 'config\update.json'
 )) {
     $sourcePath = Join-Path $sourceFull $fileName
     if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
@@ -78,22 +79,53 @@ $portableUpdaterDir = Get-ChildItem -LiteralPath $sourceFull -Directory |
             Measure-Object -Property Length -Sum).Sum -lt 1000000)
     } | Select-Object -First 1
 if ($portableUpdaterDir) {
-    Copy-Item -LiteralPath $portableUpdaterDir.FullName -Destination (Join-Path $stage $portableUpdaterDir.Name) -Recurse -Force
+    $portableTarget = Join-Path $stage $portableUpdaterDir.Name
+    Copy-Item -LiteralPath $portableUpdaterDir.FullName -Destination $portableTarget -Recurse -Force
+
+    # Keep every update entry point on the same implementation. The source
+    # tree may contain an older portable updater produced by a previous
+    # release, so overwrite its script copies in the staged package.
+    $rootUpdater = Join-Path $sourceFull 'update.ps1'
+    if (Test-Path -LiteralPath $rootUpdater -PathType Leaf) {
+        # The second filename is used by older BAT files. Keep the copy
+        # unconditional so a stale or partially extracted portable folder
+        # cannot silently retain the previous updater implementation.
+        $portableScripts = @(Get-ChildItem -LiteralPath $portableTarget -Force -File |
+            Where-Object { $_.Extension -ieq '.ps1' })
+        foreach ($portableScript in $portableScripts) {
+            Copy-Item -LiteralPath $rootUpdater -Destination $portableScript.FullName -Force
+        }
+    }
 }
 
 # 发布包只允许包含程序与文档；再次清理源码复制带入的缓存和本地数据。
 $excludedDirs = @('data', 'tests', 'exports', 'logs', '.venv', '.git', '__pycache__', 'backups')
 foreach ($dirName in $excludedDirs) {
-    $excludedPaths = @(Get-ChildItem -LiteralPath $stage -Recurse -Force -Directory |
-        Where-Object { $_.Name -eq $dirName } |
+    $excludedPaths = @(Get-ChildItem -LiteralPath $stage -Recurse -Force -Directory -Filter $dirName |
         Sort-Object FullName -Descending)
     foreach ($excludedPath in $excludedPaths) {
-        [System.IO.Directory]::Delete($excludedPath.FullName, $true)
+        Remove-Item -LiteralPath $excludedPath.FullName -Recurse -Force -ErrorAction Stop
+        # Windows PowerShell 5.1 can leave an empty directory behind when
+        # Remove-Item recurses through a copied tree. Finish with the .NET
+        # directory API so the release never contains empty cache folders.
+        if (Test-Path -LiteralPath $excludedPath.FullName -PathType Container) {
+            [System.IO.Directory]::Delete($excludedPath.FullName, $true)
+        }
     }
 }
 Get-ChildItem -LiteralPath $stage -Recurse -Force -File |
     Where-Object { $_.Extension -in @('.db', '.sqlite', '.sqlite3', '.jsonl', '.pyc', '.pyo') } |
     Remove-Item -Force
+
+$remainingCaches = @(Get-ChildItem -LiteralPath $stage -Recurse -Force -Directory -Filter '__pycache__' |
+    Sort-Object FullName -Descending)
+foreach ($cachePath in $remainingCaches) {
+    [System.IO.Directory]::Delete($cachePath.FullName, $true)
+}
+$remainingCaches = @(Get-ChildItem -LiteralPath $stage -Recurse -Force -Directory -Filter '__pycache__')
+if ($remainingCaches.Count -gt 0) {
+    throw 'Release staging still contains __pycache__ directories.'
+}
 
 # 骨架自带的旧清单不能参与新清单哈希计算，否则会留下旧哈希。
 $manifestTarget = [string]$stage + '\manifest.json'

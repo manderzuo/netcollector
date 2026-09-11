@@ -16,7 +16,7 @@ ApplicationWindow {
     minimumWidth: 1100
     minimumHeight: 720
     // 2.2 UI Polish 测试样本：版本号只用于界面标识，正式发布前仍需同步发布构建号。
-    property string appVersion: "2.2.3"
+    property string appVersion: "2.2.4"
     title: "多平台采集工作台 " + appVersion
     color: "#0b1220"
 
