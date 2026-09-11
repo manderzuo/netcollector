@@ -16,7 +16,7 @@ ApplicationWindow {
     minimumWidth: 1100
     minimumHeight: 720
     // 2.2 UI Polish 测试样本：版本号只用于界面标识，正式发布前仍需同步发布构建号。
-    property string appVersion: "2.2.2"
+    property string appVersion: "2.2.3"
     title: "多平台采集工作台 " + appVersion
     color: "#0b1220"
 
@@ -4532,20 +4532,48 @@ ApplicationWindow {
                             background: Rectangle { radius: 8; color: parent.enabled ? window.blue : window.panel2; border.color: window.line }
                         }
                     }
-                    Text {
-                        text: {
-                            var status = backend.updateStatus || {}
-                            var detail = status.notes ? " · " + status.notes : ""
-                            return (status.message || "尚未检查更新") + detail
+                     Text {
+                         text: {
+                             var status = backend.updateStatus || {}
+                             var detail = status.notes ? " · " + status.notes : ""
+                             return (status.message || "尚未检查更新") + detail
                         }
                         color: backend.updateStatus.available ? window.green : (backend.updateStatus.message && backend.updateStatus.message.indexOf("失败") >= 0 ? "#ff9b9b" : window.muted)
                         wrapMode: Text.WordWrap
                         maximumLineCount: 2
                         elide: Text.ElideRight
-                        Layout.fillWidth: true
-                        font.pixelSize: 12
-                    }
-                    Text { text: backend.diagnosticExportPath ? "日志已导出：" + backend.diagnosticExportPath : "只读查看连接、账号和健康状态；不会因为刷新诊断而打开、关闭或操作浏览器"; color: backend.diagnosticExportPath ? window.green : window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                         Layout.fillWidth: true
+                         font.pixelSize: 12
+                     }
+                     Rectangle {
+                         visible: Boolean(backend.updateStatus.checking || backend.updateStatus.updating)
+                         Layout.fillWidth: true
+                         Layout.preferredHeight: 58
+                         radius: 9
+                         color: window.panel2
+                         border.color: window.line
+                         ColumnLayout {
+                             anchors.fill: parent
+                             anchors.leftMargin: 14
+                             anchors.rightMargin: 14
+                             anchors.topMargin: 9
+                             anchors.bottomMargin: 9
+                             spacing: 6
+                             RowLayout {
+                                 Layout.fillWidth: true
+                                 Text { text: backend.updateStatus.detail || (backend.updateStatus.checking ? "正在检查更新" : "更新程序启动中"); color: window.muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                 Text { text: backend.updateStatus.updating ? Math.max(0, Math.min(100, Number(backend.updateStatus.progress || 0))) + "%" : ""; color: window.blue; font.pixelSize: 12 }
+                             }
+                             ProgressBar {
+                                 visible: backend.updateStatus.updating
+                                 Layout.fillWidth: true
+                                 from: 0
+                                 to: 100
+                                 value: Math.max(0, Math.min(100, Number(backend.updateStatus.progress || 0)))
+                             }
+                         }
+                     }
+                     Text { text: backend.diagnosticExportPath ? "日志已导出：" + backend.diagnosticExportPath : "只读查看连接、账号和健康状态；不会因为刷新诊断而打开、关闭或操作浏览器"; color: backend.diagnosticExportPath ? window.green : window.muted; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
                     RowLayout {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 136

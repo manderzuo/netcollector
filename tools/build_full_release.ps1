@@ -40,7 +40,7 @@ foreach ($rootName in @('src', 'assets', 'lib')) {
 
 foreach ($fileName in @(
     'README.md', 'VERSION.txt', 'BUILD_ID.txt', 'requirements.txt', 'requirements-v2.txt',
-    'monitor_gui.ps1', 'update.ps1', 'config\update.json', 'docs\更新说明-v2.2.2.md'
+    'monitor_gui.ps1', 'update.ps1', 'config\update.json'
 )) {
     $sourcePath = Join-Path $sourceFull $fileName
     if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
@@ -50,32 +50,55 @@ foreach ($fileName in @(
     }
 }
 
+# Locate the versioned notes by an ASCII wildcard. This keeps the build script
+# usable on Windows PowerShell machines that do not decode UTF-8 filenames.
+$notesDir = Join-Path $sourceFull 'docs'
+$notesSource = Get-ChildItem -LiteralPath $notesDir -File -Filter ('*-v' + $version + '.md') |
+    Select-Object -First 1
+if ($notesSource) {
+    $notesTargetDir = Join-Path $stage 'docs'
+    New-Item -ItemType Directory -Path $notesTargetDir -Force | Out-Null
+    Copy-Item -LiteralPath $notesSource.FullName -Destination (Join-Path $notesTargetDir $notesSource.Name) -Force
+}
+
 foreach ($fileName in @('apply_code_update.ps1', 'apply_code_update.bat')) {
     $sourcePath = Join-Path $PSScriptRoot $fileName
     Copy-Item -LiteralPath $sourcePath -Destination $stage -Force
 }
 
-# 便携更新器也随正式包发布，免安装 EXE 包可将该文件夹复制到任意安装目录后更新。
-$portableUpdater = Join-Path $sourceFull '更新程序'
-if (Test-Path -LiteralPath $portableUpdater -PathType Container) {
-    Copy-Item -LiteralPath $portableUpdater -Destination (Join-Path $stage '更新程序') -Recurse -Force
+# The portable updater also ships with the formal package. Identify its folder
+# by its update script instead of embedding a locale-dependent folder name.
+$portableUpdaterDir = Get-ChildItem -LiteralPath $sourceFull -Directory |
+    Where-Object {
+        $_.Name -notin @('src', 'assets', 'lib', 'config', 'data', 'logs', 'tests', 'temp', 'tools', 'need', 'outputs') -and
+        -not (Test-Path -LiteralPath (Join-Path $_.FullName 'src') -PathType Container) -and
+        -not (Test-Path -LiteralPath (Join-Path $_.FullName 'assets') -PathType Container) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'update.ps1') -PathType Leaf) -and
+        ((Get-ChildItem -LiteralPath $_.FullName -Recurse -File -ErrorAction SilentlyContinue |
+            Measure-Object -Property Length -Sum).Sum -lt 1000000)
+    } | Select-Object -First 1
+if ($portableUpdaterDir) {
+    Copy-Item -LiteralPath $portableUpdaterDir.FullName -Destination (Join-Path $stage $portableUpdaterDir.Name) -Recurse -Force
 }
 
 # 发布包只允许包含程序与文档；再次清理源码复制带入的缓存和本地数据。
 $excludedDirs = @('data', 'tests', 'exports', 'logs', '.venv', '.git', '__pycache__', 'backups')
 foreach ($dirName in $excludedDirs) {
-    Get-ChildItem -LiteralPath $stage -Recurse -Force -Directory -Filter $dirName |
-        Sort-Object FullName -Descending |
-        Remove-Item -Recurse -Force
+    $excludedPaths = @(Get-ChildItem -LiteralPath $stage -Recurse -Force -Directory |
+        Where-Object { $_.Name -eq $dirName } |
+        Sort-Object FullName -Descending)
+    foreach ($excludedPath in $excludedPaths) {
+        [System.IO.Directory]::Delete($excludedPath.FullName, $true)
+    }
 }
 Get-ChildItem -LiteralPath $stage -Recurse -Force -File |
     Where-Object { $_.Extension -in @('.db', '.sqlite', '.sqlite3', '.jsonl', '.pyc', '.pyo') } |
     Remove-Item -Force
 
 # 骨架自带的旧清单不能参与新清单哈希计算，否则会留下旧哈希。
-$oldManifestPath = Join-Path $stage 'manifest.json'
-if (Test-Path -LiteralPath $oldManifestPath -PathType Leaf) {
-    Remove-Item -LiteralPath $oldManifestPath -Force
+$manifestTarget = [string]$stage + '\manifest.json'
+if ($manifestTarget -and (Test-Path -LiteralPath $manifestTarget -PathType Leaf)) {
+    Remove-Item -LiteralPath $manifestTarget -Force
 }
 
 $fileRecords = @()

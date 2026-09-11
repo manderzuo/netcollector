@@ -91,7 +91,7 @@ def fetch_manifest(url: str = DEFAULT_MANIFEST_URL, timeout: float = 15.0) -> di
         headers={
             "Accept": "application/json",
             "Cache-Control": "no-cache",
-            "User-Agent": "CollectorWorkbench-UpdateChecker/2.2.2",
+            "User-Agent": "CollectorWorkbench-UpdateChecker/2.2.3",
         },
         method="GET",
     )

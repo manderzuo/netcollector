@@ -1,1 +1,1 @@
-20260911-2.2.2-url-pipeline-monitor-v2
+20260911-2.2.3-gui-update-v1

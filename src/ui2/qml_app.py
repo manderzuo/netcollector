@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""独立的 2.2.2 QML 界面预览入口。
+"""独立的 2.2.3 QML 界面预览入口。
 
 默认生产入口是 ``src/ui2/default_app.py``，它会同时启动本地后台服务；本文件
 保留为无后台预览入口，方便只验收视觉和交互。未安装 PySide6 时给出明确提示。
@@ -24,7 +24,7 @@ try:
     from PySide6.QtQuickControls2 import QQuickStyle
 except ImportError as exc:  # pragma: no cover - 取决于 v2 额外依赖
     raise SystemExit(
-        "2.2.2 界面需要 PySide6，请先安装 requirements-v2.txt；旧版入口不受影响。"
+        "2.2.3 界面需要 PySide6，请先安装 requirements-v2.txt；旧版入口不受影响。"
     ) from exc
 
 try:
@@ -134,6 +134,9 @@ class QmlBridge(QObject):
             "latest_version": "",
             "latest_build_id": "",
             "notes": "",
+            "phase": "",
+            "progress": 0,
+            "detail": "",
             "message": "尚未检查更新",
         }
         # 定时发布的可选项和按钮状态需要随着北京时间推进而更新；只发送
@@ -1805,6 +1808,9 @@ class QmlBridge(QObject):
             "latest_version": "",
             "latest_build_id": "",
             "notes": "",
+            "phase": "checking",
+            "progress": 0,
+            "detail": "正在连接更新服务",
             "message": "正在检查线上版本…",
         })
         self.updateChanged.emit()
@@ -1839,12 +1845,18 @@ class QmlBridge(QObject):
                     "download_url": manifest["download_url"],
                     "sha256": manifest["sha256"],
                     "notes": manifest.get("notes", ""),
+                    "phase": "checked",
+                    "progress": 0,
+                    "detail": "",
                     "message": message,
                 })
             except (UpdateCheckError, OSError, ValueError, TypeError) as exc:
                 self.updateEvent.emit({
                     "checking": False,
                     "available": False,
+                    "phase": "error",
+                    "progress": 0,
+                    "detail": "",
                     "message": f"检查更新失败：{self._error_message(exc)}",
                 })
 
@@ -1887,6 +1899,7 @@ class QmlBridge(QObject):
                 [
                     powershell,
                     "-NoProfile",
+                    "-STA",
                     "-ExecutionPolicy",
                     "Bypass",
                     "-File",
@@ -1905,10 +1918,13 @@ class QmlBridge(QObject):
             self._update_status.update({
                 "updating": True,
                 "available": False,
+                "phase": "starting",
+                "progress": 3,
+                "detail": "更新窗口已启动",
                 "message": "更新程序已启动，正在关闭并重启软件…",
             })
             self.updateChanged.emit()
-            QTimer.singleShot(500, self._quit_application_for_update)
+            QTimer.singleShot(800, self._quit_application_for_update)
         except (OSError, ValueError) as exc:
             try:
                 marker = os.path.join(self._project_root(), ".update_pending")
