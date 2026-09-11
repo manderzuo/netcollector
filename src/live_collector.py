@@ -321,7 +321,21 @@ class _PlatformCtx:
             fut = asyncio.run_coroutine_threadsafe(coro_fn(*args), self.loop)
             # timeout=None 表示搜索阶段一直等待采集器返回终止元数据；
             # 单次 CDP 命令仍由 cdp.py 自身的命令级超时保护。
-            return fut.result() if timeout is None else fut.result(timeout=timeout)
+            if timeout is None:
+                return fut.result()
+            try:
+                return fut.result(timeout=timeout)
+            except (TimeoutError, asyncio.TimeoutError):
+                # concurrent.futures.Future 超时后，底层协程默认仍会在事件
+                # 循环里继续执行。若不取消，它会继续占用同一个平台上下文，
+                # 后续 URL 虽然已被 scheduler 取出，却无法真正打开详情页，
+                # 最终表现为一个 collecting 把整批任务拖住。
+                fut.cancel()
+                try:
+                    fut.result(timeout=2)
+                except Exception:
+                    pass
+                raise
 
 
 class LiveCollector(Collector):

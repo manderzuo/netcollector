@@ -304,6 +304,27 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([row[0] for row in rows], ["a"])
         sched.shutdown(close_connections=True)
 
+    def test_start_does_not_restart_task_while_bound_account_needs_human(self):
+        """旧版监控/重复开始不能把人工暂停重新变成无效的 working worker。"""
+        collector = SlowCollector(1, .01)
+        sched = Scheduler(self.db_path, bb=None, collector=collector)
+        account_id = sched.add_account("a", "wa", "douyin")
+        task = sched.create_task("K", target_count=1, task_accounts=["a"])
+        db.update_account_status(
+            sched.conn, account_id, "waiting_human",
+            wait_reason="验证码", wait_since="2026-08-28T16:00:00",
+        )
+
+        sched.start(task)
+
+        self.assertEqual(sched.get_task(task)["status"], "paused")
+        self.assertEqual(collector.count, 1)
+        self.assertFalse(any(
+            int(owner_task) == int(task)
+            for owner_task in sched._worker_task.values()
+        ))
+        sched.shutdown(close_connections=True)
+
     def test_reconcile_clears_persisted_human_freeze_after_restart(self):
         sched = Scheduler(self.db_path, bb=object(), collector=SlowCollector(0))
         account_id = sched.add_account("a", "window-a", "douyin")
@@ -439,6 +460,61 @@ class CoreTests(unittest.TestCase):
         sched.start(task)
         time.sleep(.2)
         self.assertEqual(collector.search_calls, 1)
+        sched.shutdown(close_connections=True)
+
+    def test_normal_search_persists_completed_phase(self):
+        sched = Scheduler(self.db_path, bb=None, collector=SlowCollector(1, .01))
+        sched.add_account("a", "w", "douyin")
+        task = sched.create_task("K", target_count=1, task_accounts=["a"])
+        sched.start(task)
+        self.assertEqual(self.wait_status(sched, task, {"done"}), "done")
+        row = sched.conn.execute(
+            "SELECT search_phase_complete FROM tasks WHERE id = ?", (task,)
+        ).fetchone()
+        query = sched.conn.execute(
+            "SELECT status FROM task_search_queries WHERE task_id = ?", (task,)
+        ).fetchone()
+        self.assertEqual(row["search_phase_complete"], 1)
+        self.assertEqual(query["status"], "completed")
+        sched.shutdown(close_connections=True)
+
+    def test_completed_search_after_human_recovery_does_not_search_again(self):
+        collector = SlowCollector(0, .01)
+        sched = Scheduler(self.db_path, bb=None, collector=collector)
+        sched.add_account("a", "w", "douyin")
+        task = sched.create_task("K", target_count=1, task_accounts=["a"])
+        task_row = sched.get_task(task)
+        query_rows = sched._ensure_task_search_queries(task_row, 1)
+        self.assertEqual(len(query_rows), 1)
+        db.insert_video(
+            sched.conn, task, "legacy-1", "https://example.test/legacy-1",
+            search_query="K",
+        )
+        run_id = sched._ensure_collection_run(task_row)
+        self.assertTrue(run_id)
+        sched._record_collection_event(
+            task, "search", "search_finished", "已滚动到底部且连续无新增视频",
+            {"discovered_count": 1, "new_count": 1, "duplicate_count": 0},
+        )
+        sched._update_collection_run(task, status="paused", stop_reason="需要人工验证：验证码")
+        sched.conn.execute(
+            "UPDATE tasks SET search_phase_complete = 0, search_exhausted = 0 WHERE id = ?",
+            (task,),
+        )
+        sched.conn.execute(
+            "UPDATE task_search_queries SET status = 'pending' WHERE task_id = ?", (task,)
+        )
+        sched.conn.commit()
+
+        self.assertTrue(sched.recover_completed_search_after_human(task))
+        repaired = sched.conn.execute(
+            "SELECT search_phase_complete, search_exhausted FROM tasks WHERE id = ?", (task,)
+        ).fetchone()
+        self.assertEqual(repaired["search_phase_complete"], 1)
+        self.assertEqual(repaired["search_exhausted"], 1)
+        with patch.object(collector, "search", side_effect=AssertionError("不应重新搜索")):
+            sched.start(task)
+        self.assertEqual(self.wait_status(sched, task, {"done"}), "done")
         sched.shutdown(close_connections=True)
 
     def test_manual_continue_reopens_exhausted_search(self):

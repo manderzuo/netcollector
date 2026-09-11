@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""2.1.1 本地后台任务服务兼容层。
+"""2.2.2 本地后台任务服务兼容层。
 
 本模块不改变现有 GUI 的启动方式。它把已有 ``Scheduler`` 包装成一个仅
 监听本机回环地址的 JSON Lines 服务，先用于集成测试，后续由 Tk/QML GUI
@@ -4132,7 +4132,16 @@ class BackendService:
             "人工" in interruption_text or "验证" in interruption_text
             or bool(self.scheduler.waiting_accounts_for_task(tid))
         )
-        force_search = bool(int(task.get("search_exhausted", 0) or 0)) and not human_interrupted
+        pending_video_work = self.scheduler.task_video_left(tid) > 0
+        if pending_video_work and self.scheduler.recover_completed_search_after_human(tid):
+            human_interrupted = True
+        # 有待采集作品时，继续动作只能回到阶段 B。尤其是旧版任务：
+        # 人工验证后“用户暂停”可能覆盖原 stop_reason，不能据此重开搜索。
+        force_search = (
+            bool(int(task.get("search_exhausted", 0) or 0))
+            and not human_interrupted
+            and not pending_video_work
+        )
         bound_names = task.get("task_accounts") or "[]"
         if isinstance(bound_names, str):
             try:

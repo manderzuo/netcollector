@@ -56,6 +56,31 @@ class MultiKeywordCollector(FakeCollector):
         return rows
 
 
+class IncrementalMonitoringCollector(FakeCollector):
+    """每次搜索返回一个新 URL，验证普通监控任务能开启下一轮。"""
+
+    class Result(list):
+        search_complete = True
+        reached_target = True
+        no_more_results = False
+        rounds = 1
+
+    def __init__(self):
+        super().__init__(video_count=0)
+        self.search_calls = 0
+
+    def search(self, keyword, platform, mode="standard", target_count=100,
+               window_id=None, search_sort="default"):
+        self.search_calls += 1
+        vid = f"monitor_vid_{self.search_calls}"
+        return self.Result([{
+            "vid": vid,
+            "url": f"https://example.test/{vid}",
+            "title": keyword,
+            "author": "monitor",
+        }])
+
+
 class OperationsFoundationTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -616,6 +641,56 @@ class OperationsFoundationTests(unittest.TestCase):
         # 同一轮不能再次创建搜索任务。
         self.assertEqual(runner.run_once(), [])
         scheduler.stop_task(task_id)
+        scheduler.shutdown(close_connections=True)
+
+    def test_monitor_runner_does_not_auto_resume_paused_task(self):
+        scheduler = Scheduler(self.db_path, collector=FakeCollector(video_count=1))
+        scheduler.add_account("暂停监控账号", "window-monitor-paused", "douyin")
+        task_id = scheduler.create_task(
+            "暂停监控", "douyin", target_count=1, execution_mode="monitoring",
+            task_accounts=["暂停监控账号"],
+        )
+        self.conn.execute(
+            "UPDATE tasks SET status = 'paused' WHERE id = ?", (task_id,)
+        )
+        self.conn.execute(
+            "UPDATE monitoring_rules SET next_run_at = ? WHERE task_id = ?",
+            ("2026-08-24 09:00:00", task_id),
+        )
+        self.conn.commit()
+        runner = MonitoringRunner(scheduler)
+        self.assertEqual(runner.run_once(), [])
+        scheduler.shutdown(close_connections=True)
+
+    def test_normal_monitoring_task_starts_next_search_after_url_pool_drains(self):
+        collector = IncrementalMonitoringCollector()
+        scheduler = Scheduler(self.db_path, collector=collector)
+        scheduler.add_account("普通监控账号", "window-monitor-normal", "douyin")
+        task_id = scheduler.create_task(
+            "普通监控", "douyin", target_count=1, execution_mode="monitoring",
+            task_accounts=["普通监控账号"],
+        )
+
+        scheduler.start(task_id)
+        self.assertTrue(scheduler.wait_for_task(task_id, timeout=5))
+        self.assertEqual(collector.search_calls, 1)
+
+        self.conn.execute(
+            "UPDATE monitoring_rules SET next_run_at = ? WHERE task_id = ?",
+            ("2026-08-24 09:00:00", task_id),
+        )
+        self.conn.commit()
+        runner = MonitoringRunner(scheduler)
+        self.assertEqual(runner.run_once(), [task_id])
+        self.assertTrue(scheduler.wait_for_task(task_id, timeout=5))
+
+        self.assertEqual(collector.search_calls, 2)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM videos WHERE task_id = ?", (task_id,)
+            ).fetchone()[0],
+            2,
+        )
         scheduler.shutdown(close_connections=True)
 
     def test_monitoring_no_more_gate_blocks_automatic_retry_but_allows_force(self):

@@ -40,7 +40,7 @@ foreach ($rootName in @('src', 'assets', 'lib')) {
 
 foreach ($fileName in @(
     'README.md', 'VERSION.txt', 'BUILD_ID.txt', 'requirements.txt', 'requirements-v2.txt',
-    'monitor_gui.ps1', 'update.ps1', 'config\update.json', 'docs\更新说明-v2.1.md'
+    'monitor_gui.ps1', 'update.ps1', 'config\update.json', 'docs\更新说明-v2.2.2.md'
 )) {
     $sourcePath = Join-Path $sourceFull $fileName
     if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {

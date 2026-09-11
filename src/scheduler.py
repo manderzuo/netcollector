@@ -879,6 +879,58 @@ class Scheduler:
         }
         return bool(values.intersection({str(item or "").strip() for item in bound_names}))
 
+    def _waiting_human_accounts_for_task_unlocked(self, task: dict) -> list[dict]:
+        """返回当前任务实际可能使用的人工冻结账号。
+
+        监控轮询、GUI 的“开始”和旧版恢复入口都可能调用 ``start``。
+        人工验证期间不能让这些入口重新起一个只会停在
+        ``_park_human`` 的 worker；否则账号看起来是 working，URL 却永远
+        停留在 collecting。调用方必须先完成验证，再走 resume。
+
+        调用约定：调用者已经持有 ``_conn_lock``；本方法不再获取锁。
+        """
+        names = task.get("task_accounts") or "[]"
+        if isinstance(names, str):
+            try:
+                names = _json.loads(names)
+            except (TypeError, ValueError):
+                names = []
+        if not isinstance(names, list):
+            names = []
+        bound_names = {str(item or "").strip() for item in names if str(item or "").strip()}
+
+        assigned_names = set()
+        if not bound_names:
+            rows = self.conn.execute(
+                "SELECT DISTINCT assigned_account FROM videos "
+                "WHERE task_id = ? AND assigned_account IS NOT NULL "
+                "AND status IN ('assigned','collecting')",
+                (int(task.get("id") or 0),),
+            ).fetchall()
+            assigned_names = {
+                str(row["assigned_account"] or "").strip()
+                for row in rows if str(row["assigned_account"] or "").strip()
+            }
+
+        rows = self.conn.execute(
+            "SELECT id, name, nickname, wait_reason FROM accounts "
+            "WHERE platform = ? AND status = 'waiting_human' ORDER BY id",
+            (str(task.get("platform") or "douyin"),),
+        ).fetchall()
+        result = []
+        for row in rows:
+            account = self._r(row)
+            identity = {
+                str(account.get("name") or "").strip(),
+                str(account.get("nickname") or "").strip(),
+            }
+            if bound_names and not identity.intersection(bound_names):
+                continue
+            if not bound_names and assigned_names and not identity.intersection(assigned_names):
+                continue
+            result.append(account)
+        return result
+
     def _all_tasks(self):
         cur = self.conn.execute("SELECT * FROM tasks ORDER BY id")
         return [self._r(r) for r in cur.fetchall()]
@@ -911,6 +963,85 @@ class Scheduler:
         )
         r = cur.fetchone()
         return int(r["c"]) if r else 0
+
+    def task_video_left(self, task_id: int) -> int:
+        """返回任务中仍需详情采集的作品数（供后台恢复逻辑使用）。"""
+        with self._conn_lock:
+            return self._task_video_left(int(task_id))
+
+    def recover_completed_search_after_human(self, task_id: int) -> bool:
+        """修复旧任务：搜索已完成、人工验证后恢复时不再重开阶段 A。
+
+        2.1.2 的任务可能已经把 ``task_search_queries`` 重置为 pending，
+        但运行事件仍保留了“搜索完成 -> 人工验证暂停”的事实。只在存在待
+        处理作品时修复，避免把用户明确要求的新一轮补采误判成详情续跑。
+        """
+        tid = int(task_id)
+        with self._conn_lock:
+            if self._task_video_left(tid) <= 0:
+                return False
+            try:
+                rows = self.conn.execute(
+                    "SELECT ce.event_type, ce.message, ce.payload "
+                    "FROM collection_events ce "
+                    "JOIN collection_runs cr ON cr.run_id = ce.run_id "
+                    "WHERE cr.task_id = ? ORDER BY ce.id",
+                    (tid,),
+                ).fetchall()
+            except sqlite3.Error:
+                return False
+
+            latest_search_complete = False
+            latest_search_no_more = False
+            human_after_search = False
+            for row in rows:
+                event_type = str(row["event_type"] or "")
+                if event_type == "search_finished":
+                    try:
+                        payload = _json.loads(row["payload"] or "{}")
+                    except (TypeError, ValueError):
+                        payload = {}
+                    message = str(row["message"] or "")
+                    latest_search_no_more = bool(
+                        payload.get("no_more_results")
+                        or any(marker in message for marker in (
+                            "没有更多", "无新增", "滚动到底部",
+                        ))
+                    )
+                    latest_search_complete = bool(
+                        payload.get("search_complete")
+                        or payload.get("reached_target")
+                        or payload.get("no_more_results")
+                        or any(marker in message for marker in (
+                            "达到目标", "没有更多", "无新增", "滚动到底部",
+                        ))
+                    )
+                    human_after_search = False
+                elif (latest_search_complete and event_type == "run_paused"
+                      and any(marker in str(row["message"] or "")
+                              for marker in ("人工", "验证"))):
+                    human_after_search = True
+
+            if not (latest_search_complete and human_after_search):
+                return False
+
+            query_status = "no_more" if latest_search_no_more else "completed"
+            self.conn.execute(
+                "UPDATE task_search_queries SET status = ?, updated_at = ? "
+                "WHERE task_id = ? AND status NOT IN ('completed','no_more')",
+                (query_status, db._now_iso(), tid),
+            )
+            self.conn.execute(
+                "UPDATE tasks SET search_phase_complete = 1, search_exhausted = ?, "
+                "updated_at = ? WHERE id = ?",
+                (int(latest_search_no_more), db._now_iso(), tid),
+            )
+            self.conn.commit()
+        self._emit_log(
+            f"[scheduler] 任务 {tid} 检测到搜索完成后的人工验证，已恢复阶段A终态，"
+            "继续已有作品的详情采集"
+        )
+        return True
 
     def _task_video_left_ctl(self, task_id: int) -> int:
         """供后台线程（supervisor）使用的同义查询 —— 走 check_same_thread=False 的 self.ctl。"""
@@ -1695,6 +1826,23 @@ class Scheduler:
             task = self._r(db.get_task(self.conn, task_id))
             if not task:
                 raise ValueError(f"task {task_id} 不存在")
+            waiting_human = self._waiting_human_accounts_for_task_unlocked(task)
+            if waiting_human:
+                # 防御性闸门：人工验证期间即使是旧版监控轮询、重复点击“开始”
+                # 或外部恢复入口调用 start，也不能把任务重新起成一个实际不
+                # 会前进的 worker。只有 resolve_human + resume 后才允许继续。
+                reason = str(
+                    waiting_human[0].get("wait_reason") or "需要人工验证"
+                ).strip()
+                db.update_task_status(
+                    self.conn, task_id, "paused", f"需要人工验证：{reason}"
+                )
+                self._task_status[task_id] = "paused"
+                self._emit_log(
+                    f"[scheduler] 任务 {task_id} 检测到人工冻结账号，"
+                    "暂不启动详情采集；完成验证后请点击继续"
+                )
+                return task_id
             existing_phase = self._phase_threads.get(task_id)
             if existing_phase is not None and existing_phase.is_alive():
                 # 阶段 A 正在等待暂停事件；继续操作只需唤醒原线程，
@@ -1708,13 +1856,35 @@ class Scheduler:
             search_phase_reset = False
             query_rows = self._ensure_task_search_queries(task, target_count)
             is_keyword_group = bool(task.get("keyword_group_id") and query_rows)
+            # 监控任务的每一轮都分成“搜索新增 URL -> 详情采集”两步。
+            # 旧逻辑只给关键词组重置搜索状态，普通关键词在第一轮完成后
+            # 会一直保留 search_exhausted/search_phase_complete，下一次到期
+            # 监控只能直接返回 incomplete，看起来就像监控没有启动。
+            # 只有当前 URL 池已经清空时才开新轮，避免新轮搜索与详情采集并行。
+            monitoring_pool_empty = (
+                is_monitoring and self._task_video_left(task_id) == 0
+                and bool(query_rows)
+                and (
+                    search_phase_complete
+                    or search_exhausted
+                    or all(
+                        str(row.get("status") or "") in ("completed", "no_more")
+                        for row in query_rows
+                    )
+                )
+            )
+            if monitoring_pool_empty:
+                self._reset_task_search_queries(task_id)
+                search_exhausted = False
+                search_phase_complete = False
+                search_phase_reset = True
             if is_keyword_group:
                 # 任务表中的 target_count 是“每个关键词”的目标；阶段 B 使用总目标。
                 target_count = sum(
                     max(1, int(row.get("target_count") or task.get("target_count") or 100))
                     for row in query_rows
                 )
-                if is_monitoring and self._task_video_left(task_id) == 0:
+                if is_monitoring and self._task_video_left(task_id) == 0 and not search_phase_reset:
                     # 每轮监控都重新检查所有预制关键词的最新结果。
                     self._reset_task_search_queries(task_id)
                     search_exhausted = False
@@ -1732,6 +1902,11 @@ class Scheduler:
                     search_phase_complete = self._recover_keyword_search_phase(
                         task, task_id, query_rows
                     ) or search_phase_complete
+            elif search_phase_reset:
+                # 普通关键词也需要读取重置后的 pending 快照；否则下面的
+                # search_rows_terminal 仍会看到旧的 completed/no_more，刚
+                # 重置完就又跳过搜索阶段。
+                query_rows = self._ensure_task_search_queries(task, target_count)
             if force_search and search_exhausted:
                 # 只清除“搜索已到尽头”的闸门，保留已有视频与去重数据。
                 # 新一轮若再次收到无更多提示，阶段 A 会重新写回终态。
@@ -1990,7 +2165,11 @@ class Scheduler:
                 self._record_collection_event(
                     task_id, "search", "search_finished", search_reason,
                     {"discovered_count": len(candidate_vids), "new_count": new_candidate_count,
-                     "duplicate_count": duplicate_candidate_count},
+                     "duplicate_count": duplicate_candidate_count,
+                     "search_complete": search_complete,
+                     "reached_target": reached_target,
+                     "no_more_results": no_more_results,
+                     "termination_reason": termination_detail},
                 )
                 self._emit_log(
                     f"[scheduler] 任务 {task_id} 阶段A搜索返回 {len(results)} 条，"
@@ -2098,9 +2277,16 @@ class Scheduler:
                         "new_count = ?, duplicate_count = ?, last_run_at = ?, updated_at = ? "
                         "WHERE task_id = ? AND query_order = ?",
                         (query_status, len(candidate_vids),
-                         len(candidate_vids), 0, db._now_iso(), db._now_iso(),
+                         new_candidate_count, duplicate_candidate_count,
+                         db._now_iso(), db._now_iso(),
                          task_id, int(query_rows[0].get("query_order") or 1)),
                     )
+                    if query_status in ("completed", "no_more"):
+                        self.conn.execute(
+                            "UPDATE tasks SET search_phase_complete = 1, updated_at = ? "
+                            "WHERE id = ?",
+                            (db._now_iso(), task_id),
+                        )
                     self.conn.commit()
                 if not results:
                     # 已有部分内容但本轮没有新增时，标记 incomplete，允许
@@ -2279,10 +2465,12 @@ class Scheduler:
                     with self._ctl_lock:
                         left = self._task_video_left_ctl(task_id)  # 后台线程：走 self.ctl
                         task_row = self._r(self.ctl.execute(
-                            "SELECT status, target_count FROM tasks WHERE id = ?", (task_id,)
+                            "SELECT status, target_count, execution_mode FROM tasks WHERE id = ?",
+                            (task_id,),
                         ).fetchone())
                         task_state = str(task_row.get("status") or "")
                         target = task_row.get("target_count", 100)
+                        is_monitoring = str(task_row.get("execution_mode") or "once") == "monitoring"
                         done_count = self._task_done_count_ctl(task_id)
                         search_exhausted = self._task_search_exhausted_ctl(task_id)
                     if task_state == "aborted":
@@ -2310,7 +2498,7 @@ class Scheduler:
                             self._task_status[task_id] = "paused"
                         evt.set()
                         return
-                    if left == 0 and done_count >= int(target or 100):
+                    if left == 0 and done_count >= int(target or 100) and not is_monitoring:
                         with self._lock:
                             with self._ctl_lock:
                                 db.update_task_status(self.ctl, task_id, "done")
@@ -2323,6 +2511,7 @@ class Scheduler:
                         pause_evt = self._pause_evts.get(task_id)
                         stop_evt = self._task_stop_evts.get(task_id)
                         can_refill = (
+                            not is_monitoring and
                             not search_exhausted and
                             not self._stop.is_set() and
                             not (stop_evt is not None and stop_evt.is_set()) and

@@ -170,6 +170,9 @@ class TestBrowserReplyPlatformScripts(unittest.TestCase):
         self.assertIn("expandNestedReplies", note_fill)
         self.assertIn("comment-reply-expand-btn", note_fill)
         self.assertIn("douyin_nested_reply_expand", note_fill)
+        self.assertIn("expandClickLimit = 24", note_fill)
+        self.assertIn("expandStallLimit = 3", note_fill)
+        self.assertIn("expandDisabled", note_fill)
 
         # 普通抖音视频的楼中楼同样默认折叠，不能只在 Note 页面展开。
         video_target = replace(

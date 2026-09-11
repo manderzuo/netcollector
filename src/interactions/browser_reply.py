@@ -1796,8 +1796,19 @@ def _fill_script(target: ReplyTarget, content: str) -> str:
       // 采集阶段的展开状态仍然存在，因此定位前和滚动加载后都展开一次。
       // 不使用 scrollIntoView，避免点击展开入口时把整个 Note 页面滚到底部。
       const expandedReplyButtons = new WeakSet();
+      let expandDisabled = false;
+      let expandClickTotal = 0;
+      let expandStalledRounds = 0;
+      let lastExpandSignature = '';
+      const expandClickLimit = 24;
+      const expandStallLimit = 3;
       const expandNestedReplies = () => {{
         if (!isDouyin) return {{clicked:0, labels:[], nodeCount:collectCommentNodes().length}};
+        if (expandDisabled || expandClickTotal >= expandClickLimit) {{
+          return {{clicked:0, labels:[], nodeCount:collectCommentNodes().length,
+            disabled:expandDisabled, total:expandClickTotal,
+            stalled:expandStalledRounds}};
+        }};
         const expandRe = /(展开|查看|显示|更多)\\s*(?:更多\\s*)?\\d*\\s*(?:条)?\\s*(?:回复|评论)/;
         const isInViewport = el => {{
           const r = el.getBoundingClientRect();
@@ -1821,6 +1832,7 @@ def _fill_script(target: ReplyTarget, content: str) -> str:
         }});
         const clicked = [];
         for (const button of candidates.slice(0, 12)) {{
+          if (expandClickTotal + clicked.length >= expandClickLimit) break;
           try {{
             expandedReplyButtons.add(button);
             button.focus?.();
@@ -1832,8 +1844,18 @@ def _fill_script(target: ReplyTarget, content: str) -> str:
             clicked.push(shortText(button).slice(0, 80) || button.className || 'reply-expand-button');
           }} catch (e) {{}}
         }}
+        const signature = clicked.join('|');
+        if (clicked.length) {{
+          if (signature && signature === lastExpandSignature) expandStalledRounds += 1;
+          else expandStalledRounds = 0;
+          lastExpandSignature = signature;
+          expandClickTotal += clicked.length;
+          if (expandStalledRounds >= expandStallLimit
+              || expandClickTotal >= expandClickLimit) expandDisabled = true;
+        }}
         return {{clicked:clicked.length, labels:clicked,
-          nodeCount:collectCommentNodes().length}};
+          nodeCount:collectCommentNodes().length, disabled:expandDisabled,
+          total:expandClickTotal, stalled:expandStalledRounds}};
       }};
       const findMatches = () => {{
         const nodes = collectCommentNodes();

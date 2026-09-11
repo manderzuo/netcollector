@@ -131,6 +131,8 @@ async def load_feeds(c, sid, keyword, target_count=100,
     target = max(1, int(target_count or 100))
     stale_rounds = 0
     bottom_rounds = 0
+    end_text_stale_rounds = 0
+    last_end_text = False
     reached_target = False
     no_more_results = False
     rounds = 0
@@ -169,8 +171,16 @@ async def load_feeds(c, sid, keyword, target_count=100,
                 bottom_rounds += 1
             else:
                 bottom_rounds = 0
-            # 连续多轮停在底部且没有新笔记，或页面明确显示结束，才认定无更多。
-            if (state.get("endText") and stale_rounds >= 2) or (bottom_rounds >= 12 and stale_rounds >= 12):
+            # body 文本可能包含其它区域的“没有更多”，必须同时在底部、
+            # 连续无新增且结束状态连续出现，避免搜索提前结束。
+            if state.get("endText") and at_bottom and stale_rounds >= 1:
+                end_text_stale_rounds = end_text_stale_rounds + 1 if last_end_text else 1
+                last_end_text = True
+            else:
+                end_text_stale_rounds = 0
+                last_end_text = False
+            # 连续多轮停在底部且没有新笔记，或结束状态稳定出现，才认定无更多。
+            if (end_text_stale_rounds >= 2) or (bottom_rounds >= 12 and stale_rounds >= 12):
                 no_more_results = True
                 break
         except Exception:

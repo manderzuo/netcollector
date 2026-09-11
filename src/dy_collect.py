@@ -352,6 +352,8 @@ async def search_videos(c, sid, keyword, responses=None, mode="standard",
     min_no_more_rounds = 12
     stale_rounds = 0
     bottom_stale_rounds = 0
+    end_text_stale_rounds = 0
+    last_end_message = ""
     last_stream_count = 0
     last_candidate_count = 0
     last_scroll_height = 0
@@ -474,9 +476,22 @@ async def search_videos(c, sid, keyword, responses=None, mode="standard",
             bottom_stale_rounds += 1
         else:
             bottom_stale_rounds = 0
-        if bool(state.get("endText")) and stale_rounds >= 1:
+        # 结束文案可能来自页面其它区域（推荐卡片、弹层或旧 DOM），不能
+        # 只因 body 文本出现一次就结束搜索。必须已经在底部，并连续两轮
+        # 没有新增且结束文案保持一致，才确认确实没有更多结果。
+        end_message = str(state.get("endMessage") or "")
+        if bool(state.get("endText")) and at_bottom and not progress:
+            if end_message and end_message == last_end_message:
+                end_text_stale_rounds += 1
+            else:
+                end_text_stale_rounds = 1
+            last_end_message = end_message
+        else:
+            end_text_stale_rounds = 0
+            last_end_message = ""
+        if end_text_stale_rounds >= 2:
             no_more_results = True
-            termination_reason = f"页面提示：{state.get('endMessage') or '暂时没有更多了'}"
+            termination_reason = f"页面提示：{end_message or '暂时没有更多了'}"
             break
         if bottom_stale_rounds >= min_no_more_rounds:
             no_more_results = True
@@ -619,6 +634,7 @@ def parse_stream_ndjson(raw: str) -> list:
 TRIGGER_JS = '''(function(){
   try{
     let acted=false;
+    const clicked=[];
     // 优先寻找真正可滚动的评论容器，不能命中单条评论节点。
     const visible=(el)=>{if(!el)return false;const s=getComputedStyle(el),r=el.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity||1)>0&&r.width>0&&r.height>0;};
     const selectors=['.comment-mainContent','.comment-container','.route-scroll-container','[data-e2e="scroll-container"]','[class*="scroll-container"]','[class*="comment-"]','[class*="comment"]'];
@@ -650,10 +666,11 @@ TRIGGER_JS = '''(function(){
         b.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,view:window}));
         b.click?.();
         acted=true;
+        clicked.push(shortText(b).slice(0,80) || 'reply-expand-button');
       }catch(e){}
     }
-    return acted;
-  }catch(e){return false;}
+    return {acted, clicked:clicked.length, labels:clicked};
+  }catch(e){return {acted:false, clicked:0, labels:[]};}
 })()'''
 
 
@@ -723,6 +740,12 @@ async def fetch_comments(c, sid, vid_url, quiet=4, max_work=300,
     last_seen = _time.time()
     last_trigger = _time.time()
     work_deadline = _time.time() + max_work
+    # 楼中楼入口是动态节点。验证码/灰屏/接口失败时，页面可能不断重新
+    # 渲染同一批入口；没有熔断就会反复点击，拖到单作品的最大工作时长。
+    expand_signature = ""
+    expand_stalled_rounds = 0
+    expand_click_total = 0
+    expand_disabled = False
 
     while _time.time() < work_deadline:
         while pause_event is not None and not pause_event.is_set():
@@ -746,7 +769,23 @@ async def fetch_comments(c, sid, vid_url, quiet=4, max_work=300,
         if _time.time() - last_trigger > 2:
             last_trigger = _time.time()
             try:
-                await c.eval(TRIGGER_JS, sid)
+                if not expand_disabled:
+                    trigger_result = await c.eval(TRIGGER_JS, sid)
+                    if isinstance(trigger_result, dict):
+                        labels = [str(v or "")[:80] for v in (trigger_result.get("labels") or [])]
+                        clicked = int(trigger_result.get("clicked") or len(labels) or 0)
+                        if clicked:
+                            signature = "|".join(labels)
+                            if signature and signature == expand_signature:
+                                expand_stalled_rounds += 1
+                            else:
+                                expand_stalled_rounds = 0
+                            expand_signature = signature
+                            expand_click_total += clicked
+                            # 3 轮点击结果完全不变，或累计点击达到安全上限，
+                            # 认定展开失败；后续仍继续滚动和采集一级评论。
+                            if expand_stalled_rounds >= 3 or expand_click_total >= 24:
+                                expand_disabled = True
                 await c.eval("window.scrollTo(0, document.body.scrollHeight)", sid)
             except Exception:
                 pass

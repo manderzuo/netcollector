@@ -30,7 +30,10 @@ class MonitoringRunner:
         with self.scheduler._conn_lock:  # scheduler 的 SQLite 共享连接锁
             rows = self.scheduler.conn.execute(
                 "SELECT id, status FROM tasks WHERE execution_mode = 'monitoring' "
-                "AND status NOT IN ('phase_a_search', 'phase_b_comments', 'running') "
+                # 人工验证/用户暂停必须等待明确的“继续采集”，监控轮询不能
+                # 把暂停任务自动拉起，否则会留下 collecting 断点但没有真正
+                # 运行的 worker，界面长期显示不再推进。
+                "AND status NOT IN ('paused', 'phase_a_search', 'phase_b_comments', 'running') "
                 "ORDER BY id"
             ).fetchall()
             rules = MonitoringRuleStore(self.scheduler.conn)
