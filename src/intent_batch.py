@@ -152,6 +152,56 @@ class IntentBatchProcessor:
             self._pending.add(int(comment_id))
         self._schedule_ready_batches(task_id=task_id)
 
+    def on_comments(self, items: list[tuple[int, dict | None]], *,
+                    task_id: int | None = None) -> None:
+        """批量接收已落库评论，避免大评论作品逐条初始化意图处理。
+
+        ``on_comment`` 保留给普通采集路径；高评论量后台队列使用本方法，
+        只读取一次 LLM 配置，并把本地规则评论合并为一次数据库处理。
+        """
+        normalized = []
+        for comment_id, comment in items or []:
+            if comment_id is None:
+                continue
+            normalized.append((int(comment_id), comment))
+        if not normalized:
+            return
+
+        filtered_ids = []
+        eligible_ids = []
+        for comment_id, comment in normalized:
+            if comment is not None and not is_llm_eligible_comment(comment):
+                filtered_ids.append(comment_id)
+            else:
+                eligible_ids.append(comment_id)
+
+        if filtered_ids:
+            with self._lock:
+                self._filtered_since_log += len(filtered_ids)
+                now = time.monotonic()
+                should_log = now - self._last_filtered_log_at >= 30.0
+                if should_log:
+                    filtered_count = self._filtered_since_log
+                    self._filtered_since_log = 0
+                    self._last_filtered_log_at = now
+            if should_log:
+                self._log(
+                    f"[intent] 评论意向分析：已过滤 {filtered_count} 条非文本评论，"
+                    "统一使用本地规则，不逐条发送 LLM"
+                )
+            self._apply_local(filtered_ids, source="filtered_non_text")
+
+        if not eligible_ids or not self._llm_configured():
+            if eligible_ids:
+                self._apply_local(eligible_ids, source="local")
+            return
+
+        with self._lock:
+            if self._closed:
+                return
+            self._pending.update(eligible_ids)
+        self._schedule_ready_batches(task_id=task_id)
+
     def _llm_configured(self) -> bool:
         now = time.monotonic()
         with self._lock:

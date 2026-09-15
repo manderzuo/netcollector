@@ -695,11 +695,17 @@ def insert_comment(conn: sqlite3.Connection, video_id: int, user_id: str,
                    nickname: str = None, content: str = None,
                    comment_time: str = None, extra=None,
                    intent_score: int = 0, intent_label: str = None,
-                   reply_suggestion: str = None, platform: str = "douyin") -> int:
+                   reply_suggestion: str = None, platform: str = "douyin",
+                   commit: bool = True, return_inserted: bool = False):
     """插入一条评论，返回评论 id。
 
     UNIQUE(video_id, user_id, content)：重复评论忽略写入，返回已存在行的 id。
     extra 传 dict/list 时自动序列化为 JSON 字符串。
+
+    ``commit=False`` 供批量采集使用：调用方可在一批评论全部写入后统一提交，
+    避免每条评论都开启/提交一次 SQLite 事务。默认行为保持向后兼容。
+    ``return_inserted=True`` 时返回 ``(comment_id, inserted)``，用于只对本次
+    新增评论触发线索/意图扩展处理，避免重复采集时再次逐条做重操作。
     """
     if str(platform or "").lower() == "xhs":
         raw_comment_time = str(comment_time).strip() if comment_time else ""
@@ -715,6 +721,7 @@ def insert_comment(conn: sqlite3.Connection, video_id: int, user_id: str,
                 extra["source_comment_time"] = raw_comment_time
             if region and not extra.get("region"):
                 extra["region"] = region
+    before_changes = conn.total_changes
     conn.execute(
         "INSERT OR IGNORE INTO comments "
         "(video_id, platform, user_id, nickname, content, comment_time, extra, "
@@ -723,10 +730,15 @@ def insert_comment(conn: sqlite3.Connection, video_id: int, user_id: str,
         (video_id, platform, user_id, nickname, content, comment_time, _to_json(extra),
          intent_score, intent_label, reply_suggestion),
     )
-    conn.commit()
+    inserted = conn.total_changes > before_changes
+    if commit:
+        conn.commit()
     row = conn.execute(
         "SELECT id FROM comments WHERE video_id = ? AND platform = ? "
         "AND user_id IS ? AND content IS ?",
         (video_id, platform, user_id, content),
     ).fetchone()
-    return row["id"] if row is not None else None
+    comment_id = row["id"] if row is not None else None
+    if return_inserted:
+        return comment_id, inserted
+    return comment_id

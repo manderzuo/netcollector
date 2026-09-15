@@ -1066,27 +1066,132 @@ def _fill_bilibili_script(target: ReplyTarget, content: str) -> str:
       const collectThreads = () => [...(root?.querySelectorAll(
         'bili-comment-thread-renderer'
       ) || [])].filter(thread => thread.isConnected);
+      const walkShadow = (currentRoot, callback, depth = 0) => {{
+        if (!currentRoot || depth > 16) return;
+        let elements = [];
+        try {{ elements = [...currentRoot.querySelectorAll('*')]; }} catch (e) {{}}
+        for (const element of elements) {{
+          callback(element, currentRoot);
+          if (element.shadowRoot) walkShadow(element.shadowRoot, callback, depth + 1);
+        }}
+      }};
+      const findDeep = (owner, selector) => {{
+        const currentRoot = owner?.shadowRoot || owner;
+        let found = null;
+        walkShadow(currentRoot, element => {{
+          if (!found && element.matches?.(selector)) found = element;
+        }});
+        return found;
+      }};
+      const findDeepAll = (owner, selector) => {{
+        const currentRoot = owner?.shadowRoot || owner;
+        const found = [];
+        walkShadow(currentRoot, element => {{
+          if (element.matches?.(selector)) found.push(element);
+        }});
+        return found;
+      }};
+      const commentView = target => target.kind === 'reply'
+        ? target.node.shadowRoot
+        : findDeep(target.node, 'bili-comment-renderer')?.shadowRoot;
+      const collectTargets = () => {{
+        const targets = [];
+        for (const thread of collectThreads()) {{
+          if (commentView({{kind:'root', node:thread}}))
+            targets.push({{kind:'root', node:thread, thread}});
+          for (const node of findDeepAll(thread, 'bili-comment-reply-renderer'))
+            if (commentView({{kind:'reply', node}})) targets.push({{kind:'reply', node, thread}});
+        }}
+        return targets;
+      }};
+      const deepHasValue = (node, value) => {{
+        if (!node || !value) return false;
+        const hasAttr = element => [...(element?.attributes || [])]
+          .some(attr => String(attr.value || '').includes(value));
+        if (hasAttr(node) || String(node.outerHTML || '').includes(value)) return true;
+        let found = false;
+        walkShadow(node.shadowRoot, element => {{
+          if (!found && (hasAttr(element) || String(element.outerHTML || '').includes(value))) found = true;
+        }});
+        return found;
+      }};
+      const replyText = target => {{
+        const view = commentView(target);
+        const rich = findDeep(view, 'bili-rich-text');
+        const contents = findDeep(rich, '#contents');
+        return textNorm(contents?.innerText || contents?.textContent || '');
+      }};
+      const replyUser = target => {{
+        const userInfo = findDeep(commentView(target), 'bili-comment-user-info');
+        return findDeep(userInfo, '#user-name a');
+      }};
+      // B站楼中楼位于多层 Shadow DOM，展开按钮不能用普通 querySelector 找到。
+      const expandedReplyButtons = new WeakSet();
+      let expandClickTotal = 0;
+      let expandStalledRounds = 0;
+      let lastExpandSignature = '';
+      const expandClickLimit = 48;
+      const expandStallLimit = 3;
+      const expandRe = /(?:展开|查看|显示|更多)\\s*(?:更多\\s*)?\\d*\\s*(?:条)?\\s*(?:回复|评论)/;
+      const isExpandLabel = value => {{
+        const label = clean(value);
+        if (!label || label.length > 60
+            || /收起|隐藏|没有更多|暂无更多|暂时没有更多|已加载全部/.test(label)) return false;
+        return expandRe.test(label) || /^\\d+\\s*条\\s*(?:回复|评论)$/.test(label);
+      }};
+      const expandNestedReplies = () => {{
+        const controls = new Set();
+        for (const thread of collectThreads()) {{
+          walkShadow(thread.shadowRoot, element => {{
+            const label = clean(element.getAttribute?.('aria-label')
+              || element.getAttribute?.('title') || element.innerText || element.textContent);
+            if (!isExpandLabel(label)) return;
+            const control = element.closest?.('button,[role="button"],a') || element;
+            if (visible(control) && !expandedReplyButtons.has(control)) controls.add(control);
+          }});
+        }}
+        const clicked = [];
+        for (const control of [...controls].slice(0, 12)) {{
+          if (expandClickTotal + clicked.length >= expandClickLimit) break;
+          try {{
+            expandedReplyButtons.add(control);
+            control.focus?.();
+            control.click?.();
+            clicked.push(clean(control.innerText || control.textContent).slice(0, 80));
+          }} catch (e) {{}}
+        }}
+        if (clicked.length) {{
+          const signature = clicked.join('|');
+          if (signature && signature === lastExpandSignature) expandStalledRounds += 1;
+          else expandStalledRounds = 0;
+          lastExpandSignature = signature;
+          expandClickTotal += clicked.length;
+        }}
+        return {{clicked:clicked.length, labels:clicked,
+          total:expandClickTotal, stalled:expandStalledRounds,
+          disabled:expandStalledRounds >= expandStallLimit
+            || expandClickTotal >= expandClickLimit}};
+      }};
+      const expandAndWait = async (attempt, reason) => {{
+        const result = expandNestedReplies();
+        record('bilibili_nested_reply_expand', Object.assign({{attempt, reason}}, result));
+        if (result.clicked) await sleep(900);
+        return result;
+      }};
       const matchStats = {{identityCount:0, idCount:0, contentCount:0, timeCount:0}};
-      const findMatches = threads => {{
+      const findMatches = targets => {{
         matchStats.identityCount = 0;
         matchStats.idCount = 0;
         matchStats.contentCount = 0;
         matchStats.timeCount = 0;
-        return threads.filter(thread => {{
-          const comment = thread.shadowRoot?.querySelector(
-            'bili-comment-renderer'
-          )?.shadowRoot;
-          const user = comment?.querySelector('bili-comment-user-info')
-            ?.shadowRoot?.querySelector('#user-name a');
-          const rich = comment?.querySelector('bili-rich-text')
-            ?.shadowRoot?.querySelector('#contents');
+        return targets.filter(target => {{
+          const user = replyUser(target);
           const userText = textNorm(user?.innerText);
           const userIdHit = wantedUser && cfg.user_id
             && String(user?.getAttribute('href') || '').includes(norm(cfg.user_id));
           const userHit = wantedUser && (userText.includes(wantedUser) || userIdHit);
-          const commentText = textNorm(rich?.innerText);
-          const idHit = cfg.comment_id && String(thread.innerHTML || '')
-            .includes(norm(cfg.comment_id));
+          const commentText = replyText(target);
+          const idHit = cfg.comment_id && deepHasValue(target.node, norm(cfg.comment_id));
           if (userHit) matchStats.identityCount++;
           if (idHit) {{ matchStats.idCount++; return true; }}
           if (!userHit) return false;
@@ -1095,7 +1200,9 @@ def _fill_bilibili_script(target: ReplyTarget, content: str) -> str:
             if (contentHit) matchStats.contentCount++;
             return contentHit;
           }}
-          const timeHit = !targetTimeKey || timeKey(thread.innerText || '') === targetTimeKey;
+          const action = findDeep(commentView(target), 'bili-comment-action-buttons-renderer');
+          const pubdate = findDeep(action, '#pubdate');
+          const timeHit = !targetTimeKey || timeKey(pubdate?.innerText || '') === targetTimeKey;
           if (timeHit) matchStats.timeCount++;
           return timeHit;
         }});
@@ -1119,8 +1226,9 @@ def _fill_bilibili_script(target: ReplyTarget, content: str) -> str:
         maxTop:Math.max(0, el.scrollHeight -
           (el === document.scrollingElement ? innerHeight : el.clientHeight))
       }} : null;
-      let threads = collectThreads();
-      let matches = findMatches(threads);
+      await expandAndWait(0, 'before_initial_scan');
+      let targets = collectTargets();
+      let matches = findMatches(targets);
       if (!matches.length && host) {{
         host.scrollIntoView({{block:'start', inline:'nearest'}});
         await sleep(500);
@@ -1134,29 +1242,30 @@ def _fill_bilibili_script(target: ReplyTarget, content: str) -> str:
           else scroller.scrollTop = nextTop;
           scroller.dispatchEvent(new Event('scroll', {{bubbles:true}}));
           await sleep(600);
-          threads = collectThreads();
-          matches = findMatches(threads);
+          await expandAndWait(attempt, 'after_scroll');
+          targets = collectTargets();
+          matches = findMatches(targets);
           const after = scrollState(scroller);
           record('comment_scan_step', {{attempt, before, after,
-            threadCount:threads.length, matchCount:matches.length}});
+            threadCount:targets.length, matchCount:matches.length}});
           if (matches.length) break;
           if (after && after.scrollTop >= after.maxTop - 2) await sleep(900);
         }}
       }}
-      record('comment_candidates_collected', {{threadCount:threads.length,
+      record('comment_candidates_collected', {{threadCount:targets.length,
         matchCount:matches.length, wantedUser:cfg.nickname || cfg.user_id,
         wantedComment:cfg.comment, nonTextComment:!wantedComment,
         identityCount:matchStats.identityCount, idCount:matchStats.idCount,
         contentCount:matchStats.contentCount, timeCount:matchStats.timeCount}});
-      const thread = matches[0];
-      if (!thread) return {{ok:false, stage:'comment_not_found',
+      const matchedTarget = matches[0];
+      if (!matchedTarget) return {{ok:false, stage:'comment_not_found',
         message:'B站作品中未找到目标评论', matched:false, trace}};
-      const comment = thread.shadowRoot?.querySelector(
-        'bili-comment-renderer'
-      )?.shadowRoot;
+      const thread = matchedTarget.thread;
+      const comment = commentView(matchedTarget);
       record('comment_matched', {{tag:'BILI-COMMENT-THREAD-RENDERER',
         text:String(comment?.innerText || '').slice(0,300),
-        beforeScroll:{{pageY:scrollY, rect:rectData(thread)}}}});
+        nested:matchedTarget.kind === 'reply',
+        beforeScroll:{{pageY:scrollY, rect:rectData(matchedTarget.node)}}}});
       thread.scrollIntoView({{block:'center', inline:'nearest'}});
       await sleep(450);
       record('comment_scroll_completed', {{after:{{pageY:scrollY,
@@ -1173,9 +1282,8 @@ def _fill_bilibili_script(target: ReplyTarget, content: str) -> str:
         return {{box, boxRoot, editor}};
       }};
       let {{box, boxRoot, editor}} = findEditor();
-      const action = comment?.querySelector(
-        'bili-comment-action-buttons-renderer'
-      )?.shadowRoot;
+      const actionRenderer = findDeep(comment, 'bili-comment-action-buttons-renderer');
+      const action = actionRenderer?.shadowRoot;
       const replyButton = [...(action?.querySelectorAll('button') || [])]
         .find(button => norm(button.innerText) === '回复')
         || action?.querySelector('#reply');
@@ -1304,6 +1412,63 @@ def _fill_weibo_script(target: ReplyTarget, content: str) -> str:
         maxTop:Math.max(0, el.scrollHeight -
           (el === document.scrollingElement ? innerHeight : el.clientHeight))
       }} : null;
+      // 微博楼中楼默认折叠；必须先展开，再按 .con1 逐条匹配，
+      // 否则只会命中外层 .wbpro-scroller-item，回复入口也会点错层级。
+      const expandedReplyButtons = new WeakSet();
+      let expandClickTotal = 0;
+      let expandStalledRounds = 0;
+      let lastExpandSignature = '';
+      const expandClickLimit = 48;
+      const expandStallLimit = 3;
+      const expandRe = /(?:展开|查看|显示|更多)\\s*(?:更多\\s*)?\\d*\\s*(?:条)?\\s*(?:回复|评论)/;
+      const isExpandLabel = value => {{
+        const label = clean(value);
+        if (!label || label.length > 60
+            || /收起|隐藏|没有更多|暂无更多|暂时没有更多|已加载全部/.test(label)) return false;
+        return expandRe.test(label) || /^\\d+\\s*条\\s*(?:回复|评论)$/.test(label);
+      }};
+      const expandNestedReplies = () => {{
+        const controls = new Set();
+        for (const row of document.querySelectorAll('#scroller .wbpro-scroller-item')) {{
+          for (const el of row.querySelectorAll(
+            'button,[role="button"],a,span,div'
+          )) {{
+            const label = clean(el.getAttribute?.('aria-label')
+              || el.getAttribute?.('title') || el.innerText || el.textContent);
+            if (!isExpandLabel(label)) continue;
+            const control = el.closest?.('button,[role="button"],a') || el;
+            if (control !== row && visible(control)
+                && !expandedReplyButtons.has(control)) controls.add(control);
+          }}
+        }}
+        const clicked = [];
+        for (const control of [...controls].slice(0, 12)) {{
+          if (expandClickTotal + clicked.length >= expandClickLimit) break;
+          try {{
+            expandedReplyButtons.add(control);
+            control.focus?.();
+            control.click?.();
+            clicked.push(clean(control.innerText || control.textContent).slice(0, 80));
+          }} catch (e) {{}}
+        }}
+        if (clicked.length) {{
+          const signature = clicked.join('|');
+          if (signature && signature === lastExpandSignature) expandStalledRounds += 1;
+          else expandStalledRounds = 0;
+          lastExpandSignature = signature;
+          expandClickTotal += clicked.length;
+        }}
+        return {{clicked:clicked.length, labels:clicked,
+          total:expandClickTotal, stalled:expandStalledRounds,
+          disabled:expandStalledRounds >= expandStallLimit
+            || expandClickTotal >= expandClickLimit}};
+      }};
+      const expandAndWait = async (attempt, reason) => {{
+        const result = expandNestedReplies();
+        record('weibo_nested_reply_expand', Object.assign({{attempt, reason}}, result));
+        if (result.clicked) await sleep(900);
+        return result;
+      }};
       const scrollOneStep = el => {{
         if (!el) return {{moved:false, before:null, after:null}};
         const before = scrollState(el);
@@ -1316,8 +1481,11 @@ def _fill_weibo_script(target: ReplyTarget, content: str) -> str:
         return {{moved:after.scrollTop > before.scrollTop + 1, before, after}};
       }};
       const collect = () => [...new Set(
-        [...document.querySelectorAll('.wbpro-scroller-item')]
-      )].filter(node => node.isConnected);
+        [...document.querySelectorAll('#scroller .wbpro-scroller-item')].flatMap(item => [
+          item.querySelector('.con1'),
+          ...item.querySelectorAll('.con2 .con1')
+        ])
+      )].filter(node => node?.isConnected);
       const nodeHasValue = (node, value) => {{
         if (!node || !value) return false;
         const pool = [node, ...node.querySelectorAll('*')];
@@ -1349,6 +1517,7 @@ def _fill_weibo_script(target: ReplyTarget, content: str) -> str:
           idCount:idNodes.length, contentCount:contentNodes.length,
           timeCount:timeNodes.length, nonTextComment:!wantedComment}};
       }};
+      await expandAndWait(0, 'before_initial_scan');
       let scanned = scan();
       let nodes = scanned.nodes;
       let matches = scanned.matches;
@@ -1362,6 +1531,7 @@ def _fill_weibo_script(target: ReplyTarget, content: str) -> str:
           const before = scrollState(scroller);
           const movement = scrollOneStep(scroller);
           await sleep(650);
+          await expandAndWait(attempt, 'after_scroll');
           scanned = scan();
           nodes = scanned.nodes;
           matches = scanned.matches;
@@ -1632,6 +1802,7 @@ def _fill_script(target: ReplyTarget, content: str) -> str:
       // 抖音图文笔记的评论区默认收在右侧，必须先打开“评论”面板，
       // 否则评论节点和回复按钮不会挂载到 DOM。
       const isDouyin = /(?:^|\.)douyin\.com$/i.test(location.hostname);
+      const isXhs = /(?:^|\.)xiaohongshu\.com$/i.test(location.hostname);
       const isDouyinNote = /(?:^|\/)note\//i.test(location.pathname);
       if (isDouyinNote) {{
         // note 页控件异步挂载，且部分版本只有图标没有“评论”文字。
@@ -1800,39 +1971,71 @@ def _fill_script(target: ReplyTarget, content: str) -> str:
       let expandClickTotal = 0;
       let expandStalledRounds = 0;
       let lastExpandSignature = '';
+      // 保留抖音原有的展开上限；小红书楼中楼入口更多，使用更大的有效上限。
       const expandClickLimit = 24;
+      const effectiveExpandClickLimit = isXhs ? 48 : expandClickLimit;
       const expandStallLimit = 3;
       const expandNestedReplies = () => {{
-        if (!isDouyin) return {{clicked:0, labels:[], nodeCount:collectCommentNodes().length}};
-        if (expandDisabled || expandClickTotal >= expandClickLimit) {{
+        if (!isDouyin && !isXhs) return {{clicked:0, labels:[], nodeCount:collectCommentNodes().length}};
+        if (expandDisabled || expandClickTotal >= effectiveExpandClickLimit) {{
           return {{clicked:0, labels:[], nodeCount:collectCommentNodes().length,
             disabled:expandDisabled, total:expandClickTotal,
             stalled:expandStalledRounds}};
         }};
         const expandRe = /(展开|查看|显示|更多)\\s*(?:更多\\s*)?\\d*\\s*(?:条)?\\s*(?:回复|评论)/;
+        const isXhsExpandLabel = value => {{
+          const label = shortText({{innerText:value, textContent:value}});
+          if (!label || label.length > 60
+              || /收起|隐藏|没有更多|暂无更多|暂时没有更多|已加载全部/.test(label)) return false;
+          return expandRe.test(label) || /^\\d+\\s*条\\s*(?:回复|评论)$/.test(label);
+        }};
         const isInViewport = el => {{
           const r = el.getBoundingClientRect();
           return r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
         }};
         const shortText = el => String(el.innerText || el.textContent || '')
           .replace(/\\s+/g, ' ').trim();
-        const candidates = [...new Set([
-          ...document.querySelectorAll(
-            'button.comment-reply-expand-btn,[class*="comment-reply-expand-btn"]'
-          ),
-          ...document.querySelectorAll('button,span,div')
-        ])].filter(el => {{
+        let candidateNodes = [];
+        if (isXhs) {{
+          // 小红书楼中楼入口通常在评论行内部，文案可能是“展开 N 条回复”或
+          // “查看回复”。只扫描已识别的评论行和明确的回复/更多控件，避免对整页
+          // 所有 span/div 做 O(页面节点数) 的重复扫描。
+          const rows = collectCommentNodes();
+          candidateNodes = rows.flatMap(row => [...row.querySelectorAll(
+            '.show-more,[class*="show-more"],[class*="ShowMore"],'
+            + 'button,[role="button"],a,[class*="reply"],[class*="Reply"],'
+            + '[class*="more"],[class*="More"],[aria-label*="回复"],[title*="回复"]'
+          )]);
+        }} else {{
+          candidateNodes = [
+            ...document.querySelectorAll(
+              'button.comment-reply-expand-btn,[class*="comment-reply-expand-btn"]'
+            ),
+            ...document.querySelectorAll('button,span,div')
+          ];
+        }}
+        const candidates = [...new Set(candidateNodes.map(el => {{
+          if (!el || !isXhs) return el;
+          const label = shortText(el.getAttribute?.('aria-label')
+            || el.getAttribute?.('title') || el.textContent || el.innerText);
+          return isXhsExpandLabel(label)
+            ? (el.closest?.('button,[role="button"],a') || el) : el;
+        }}))].filter(el => {{
           if (!el.isConnected || !visible(el) || !isInViewport(el) || expandedReplyButtons.has(el)) return false;
           const text = shortText(el);
+          const label = shortText(el.getAttribute?.('aria-label')
+            || el.getAttribute?.('title') || el.textContent || el.innerText);
           const exact = el.matches?.(
             'button.comment-reply-expand-btn,[class*="comment-reply-expand-btn"]'
           );
-          const generic = text.length < 36 && expandRe.test(text);
+          const generic = isXhs
+            ? isXhsExpandLabel(label)
+            : text.length < 36 && expandRe.test(text);
           return exact || generic;
         }});
         const clicked = [];
         for (const button of candidates.slice(0, 12)) {{
-          if (expandClickTotal + clicked.length >= expandClickLimit) break;
+          if (expandClickTotal + clicked.length >= effectiveExpandClickLimit) break;
           try {{
             expandedReplyButtons.add(button);
             button.focus?.();
@@ -1851,7 +2054,7 @@ def _fill_script(target: ReplyTarget, content: str) -> str:
           lastExpandSignature = signature;
           expandClickTotal += clicked.length;
           if (expandStalledRounds >= expandStallLimit
-              || expandClickTotal >= expandClickLimit) expandDisabled = true;
+              || expandClickTotal >= effectiveExpandClickLimit) expandDisabled = true;
         }}
         return {{clicked:clicked.length, labels:clicked,
           nodeCount:collectCommentNodes().length, disabled:expandDisabled,
@@ -1887,11 +2090,12 @@ def _fill_script(target: ReplyTarget, content: str) -> str:
       }};
       const expandAndWait = async (attempt, reason) => {{
         const result = expandNestedReplies();
-        if (isDouyin) {{
-          record('douyin_nested_reply_expand', Object.assign({{attempt, reason}}, result));
+        if (isDouyin || isXhs) {{
+          record(isXhs ? 'xhs_nested_reply_expand' : 'douyin_nested_reply_expand',
+            Object.assign({{attempt, reason}}, result));
         }}
         if (result.clicked) {{
-          await sleep(700);
+          await sleep(isXhs ? 1000 : 700);
         }}
         return result;
       }};

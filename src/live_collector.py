@@ -16,6 +16,7 @@
 import asyncio
 import json
 import os
+import random
 import threading
 import time
 
@@ -65,6 +66,25 @@ PLATFORM_ALIAS = {"douyin": "douyin", "dy": "douyin",
                   "xhs": "xhs", "xiaohongshu": "xhs",
                   "kuaishou": "kuaishou", "ks": "kuaishou", "快手": "kuaishou"}
 
+# ---------------------------------------------------------------------------
+# 小红书节奏下限（代码内强制，不依赖任务参数）
+#
+# 实测小红书是各平台里最容易触发风控的：任务参数 batch_size=10 /
+# cooldown_seconds=60 相当于「连续采 10 篇只歇 60 秒」，而平台限流页一旦出现，
+# 旧实现会把它当成需要人工验证而冻结账号。这里按「约 1 篇/分钟」的下限强制降频，
+# 并对限流做退避重试，只有连续多次仍被限流才升级为人工接管。
+# ---------------------------------------------------------------------------
+XHS_MIN_NOTE_INTERVAL = (55.0, 75.0)      # 两篇笔记之间的随机最小间隔
+XHS_BREAK_EVERY_NOTES = 10                # 每采 N 篇进入一次长休
+XHS_LONG_BREAK = (60.0, 120.0)            # 长休随机时长（秒）
+XHS_RATE_LIMIT_RETRIES = 3                # 单次采集的限流重试次数
+XHS_RATE_LIMIT_BACKOFF = (60.0, 90.0)     # 首次退避时长，之后逐次翻倍
+XHS_RATE_LIMIT_BACKOFF_MAX = 600.0        # 单次退避上限
+XHS_RATE_LIMIT_JITTER = 15.0              # 退避叠加的随机抖动上限
+
+# 等待期间被取消/停止的哨兵返回值。
+_CANCELLED = object()
+
 
 class _PlatformCtx:
     """一个平台 = 一个后台事件循环 + 一个 CdpSession + 一把锁。"""
@@ -77,9 +97,12 @@ class _PlatformCtx:
         self.session = None
         self.sid = None
         self.connect_error = None
-        # 小红书详情页打开节流：每打开 20 个详情页后冷却 30 秒。
-        # _PlatformCtx.lock 保证同一窗口串行，因此该计数不会被并发 worker 重复计算。
-        self._xhs_pages_opened = 0
+        # 小红书节奏下限：不依赖任务里的 batch_size/cooldown_seconds，
+        # 保证任务参数再激进时也不会快于人工浏览节奏。
+        # _PlatformCtx.lock 保证同一窗口串行，计数不会被并发 worker 重复计算。
+        self._xhs_notes_since_break = 0
+        self._xhs_last_note_at = 0.0
+        self._xhs_note_interval = random.uniform(*XHS_MIN_NOTE_INTERVAL)
         self.ws_url = ws_url or self._load_ws()
         self.thread.start()
         # 等连接建立
@@ -152,6 +175,52 @@ class _PlatformCtx:
             self.thread.join(timeout=5)
 
     # ---------- 异步核心 ----------
+    async def _wait_with_events(self, seconds, pause_event, cancel_event):
+        """可被暂停/取消唤醒的等待；返回 False 表示已被取消或停止。
+
+        暂停期间不消耗等待时长，恢复后继续把剩余时间走完。
+        """
+        remaining = max(0.0, float(seconds))
+        while remaining > 0:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            if pause_event is not None and not pause_event.is_set():
+                await asyncio.sleep(0.2)
+                continue
+            step = min(0.5, remaining)
+            await asyncio.sleep(step)
+            remaining -= step
+        return True
+
+    async def _xhs_retry(self, factory, pause_event, cancel_event, label):
+        """执行小红书采集调用；限流时退避重试，耗尽后才升级为人工接管。
+
+        限流（"请求太频繁 / 操作过于频繁"）是暂时性的平台反压信号，不是需要
+        人工介入的状态。旧实现把限流混进 HumanBlock 直接冻结账号，导致一次
+        限流就整轮停摆；这里改为先退避重试，连续多次仍被限流才交人工处理。
+
+        返回 ``_CANCELLED`` 表示等待期间被取消或停止。
+        """
+        backoff = random.uniform(*XHS_RATE_LIMIT_BACKOFF)
+        for attempt in range(XHS_RATE_LIMIT_RETRIES):
+            try:
+                return await factory()
+            except xhs_collect3.RateLimited as exc:
+                if attempt >= XHS_RATE_LIMIT_RETRIES - 1:
+                    raise HumanInterventionRequired(
+                        "rate_limited",
+                        f"小红书{label}连续 {XHS_RATE_LIMIT_RETRIES} 次触发限流未恢复：{exc}",
+                    )
+                wait = min(backoff * (2 ** attempt), XHS_RATE_LIMIT_BACKOFF_MAX)
+                wait += random.uniform(0.0, XHS_RATE_LIMIT_JITTER)
+                print(
+                    f"[LiveCollector] xhs {label}触发限流，退避 {wait:.0f}s 后重试 "
+                    f"({attempt + 1}/{XHS_RATE_LIMIT_RETRIES})：{exc}",
+                    flush=True,
+                )
+                if not await self._wait_with_events(wait, pause_event, cancel_event):
+                    return _CANCELLED
+
     async def _search(self, keyword, mode="standard", target_count=None,
                       pause_event=None, cancel_event=None,
                       search_sort="default"):
@@ -180,11 +249,15 @@ class _PlatformCtx:
                 termination_reason=getattr(vids, "termination_reason", ""),
             )
         elif self.platform == "xhs":
-            feeds = await xhs_collect3.load_feeds(
-                self.session, self.sid, keyword, target_count=target_count,
-                pause_event=pause_event, cancel_event=cancel_event,
-                search_sort=search_sort,
-            )
+            feeds = await self._xhs_retry(
+                lambda: xhs_collect3.load_feeds(
+                    self.session, self.sid, keyword, target_count=target_count,
+                    pause_event=pause_event, cancel_event=cancel_event,
+                    search_sort=search_sort,
+                ),
+                pause_event, cancel_event, "搜索")
+            if feeds is _CANCELLED:
+                return xhs_collect3.SearchVideosResult([], search_complete=False)
             out = []
             for f in feeds:
                 nid = str(f.get("id") or "")
@@ -239,24 +312,46 @@ class _PlatformCtx:
                 "cid": c.get("cid", ""),
             } for c in comments]
         elif self.platform == "xhs":
-            if self._xhs_pages_opened >= 20:
-                print("[LiveCollector] xhs 已打开 20 个网页，冷却 30 秒…")
-                for _ in range(150):
-                    if cancel_event is not None and cancel_event.is_set():
-                        return []
-                    while pause_event is not None and not pause_event.is_set():
-                        if cancel_event is not None and cancel_event.is_set():
-                            return []
-                        await asyncio.sleep(.2)
-                    await asyncio.sleep(.2)
-                self._xhs_pages_opened = 0
-            self._xhs_pages_opened += 1
             # 从 url 解析 xsec_token（search 阶段已拼入）
             import urllib.parse as _up
             q = _up.parse_qs(_up.urlparse(url).query)
             token = (q.get("xsec_token") or [""])[0]
             note = {"id": vid, "xsec_token": token or xsec_token or ""}
-            r = await xhs_collect3.fetch_note(self.session, self.sid, note)
+
+            # 节奏下限①：两篇笔记之间保持随机最小间隔（约 1 篇/分钟）。
+            # 任务参数 batch_size/cooldown_seconds 由调度器控制批次冷却，
+            # 这里补的是采集器自身的安全下限，任务配置再激进也不会被突破。
+            if self._xhs_last_note_at:
+                elapsed = asyncio.get_running_loop().time() - self._xhs_last_note_at
+                if elapsed < self._xhs_note_interval:
+                    wait = self._xhs_note_interval - elapsed
+                    print(f"[LiveCollector] xhs 节奏下限：等待 {wait:.0f}s 后再打开下一篇",
+                          flush=True)
+                    if not await self._wait_with_events(wait, pause_event, cancel_event):
+                        return []
+            self._xhs_note_interval = random.uniform(*XHS_MIN_NOTE_INTERVAL)
+
+            # 节奏下限②：每采满 N 篇进入一次长休，稀释整体请求密度。
+            if self._xhs_notes_since_break >= XHS_BREAK_EVERY_NOTES:
+                wait = random.uniform(*XHS_LONG_BREAK)
+                print(f"[LiveCollector] xhs 已连续采集 {self._xhs_notes_since_break} 篇，"
+                      f"长休 {wait:.0f}s…", flush=True)
+                if not await self._wait_with_events(wait, pause_event, cancel_event):
+                    return []
+                self._xhs_notes_since_break = 0
+
+            # 记录“请求开始时间”用于防止失败后立即重试，但计数只在详情页
+            # 成功返回后增加；失败/取消不能消耗正常采集的长休额度。
+            self._xhs_last_note_at = asyncio.get_running_loop().time()
+
+            r = await self._xhs_retry(
+                lambda: xhs_collect3.fetch_note(
+                    self.session, self.sid, note,
+                    pause_event=pause_event, cancel_event=cancel_event),
+                pause_event, cancel_event, "笔记详情")
+            if r is _CANCELLED:
+                return []
+            self._xhs_notes_since_break += 1
             out = []
             for c in r.get("comments", []):
                 out.append({
@@ -286,15 +381,19 @@ class _PlatformCtx:
     # ---------- 同步入口（worker 线程调用）----------
     @staticmethod
     def _wrap_human(fn):
-        """把 dy/xhs 的 HumanBlock 转成 scheduler.HumanInterventionRequired（P7）。"""
+        """把平台采集器的阻塞类异常转成 scheduler.HumanInterventionRequired（P7）。
+
+        ``RateLimited`` 也会走这里：它应当由 ``_xhs_retry`` 在退避重试中消化，
+        只有连着多次都限流才会以 "rate_limited" 的理由升级为人工接管。若它
+        意外逃到这一层，必须保持相同语义，不能被当成普通采集失败计一次失败。
+        """
         try:
             return fn()
         except HumanInterventionRequired:
             raise
         except Exception as e:
-            # 平台采集器抛的"需登录/验证码/滑块"HumanBlock
             name = type(e).__name__
-            if name in ("HumanBlock", "HumanInterventionRequired"):
+            if name in ("HumanBlock", "HumanInterventionRequired", "RateLimited"):
                 reason = getattr(e, "reason", None) or str(e) or "unknown"
                 raise HumanInterventionRequired(reason, str(e))
             raise
@@ -310,11 +409,14 @@ class _PlatformCtx:
 
     def fetch_comments(self, vid, url="", xsec_token="", platform=None,
                        pause_event=None, cancel_event=None):
+        # 单作品评论最多运行 300 秒；比搜索阶段更需要等待懒加载，
+        # 但仍保留比采集器 max_work 略长的线程级兜底。
+        # 小红书额外放宽：激进降频下单篇笔记包含节奏下限等待和长休，
+        # 超时会把正常采集取消掉并误判为失败，因此给足余量。
+        timeout = 900 if self.platform == "xhs" else 360
         return self._wrap_human(lambda: self._run_sync(
             self._fetch, vid, url, xsec_token, pause_event, cancel_event,
-            # 单作品评论最多运行 300 秒；比搜索阶段更需要等待懒加载，
-            # 但仍保留比采集器 max_work 略长的线程级兜底。
-            timeout=360))
+            timeout=timeout))
 
     def _run_sync(self, coro_fn, *args, timeout=180):
         with self.lock:

@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import sys
 import urllib.parse
 
@@ -40,28 +41,119 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 
 class HumanBlock(Exception):
-    pass
+    """需要人工处理的页面状态（登录、验证码）。"""
+
+
+class RateLimited(Exception):
+    """平台限流（请求太频繁 / 操作过于频繁）。
+
+    限流是暂时性的平台反压信号，不是需要人工介入的状态：正确做法是停止
+    当前请求、按退避时长等待后重试。旧实现把限流和验证码混成同一类
+    ``HumanBlock`` 抛出，导致一次限流就冻结账号并要求人工点继续。
+    """
+
+    def __init__(self, reason: str = "rate_limited", message: str | None = None,
+                 retry_after: float | None = None):
+        self.reason = str(reason or "rate_limited")
+        self.retry_after = retry_after
+        super().__init__(str(message or "小红书触发限流，需要退避重试"))
+
+
+# ---------------------------------------------------------------------------
+# 节奏控制：小红书对同一窗口的连续请求非常敏感，固定间隔（固定 4 秒开详情、
+# 固定 0.7 秒滚一屏、固定 30 秒冷却）本身就是最容易被风控建模的特征。
+# 这里统一使用随机区间，并按“篇/分钟”限制整体速率。
+# ---------------------------------------------------------------------------
+NOTE_MIN_INTERVAL = (55.0, 75.0)        # 两篇笔记之间的随机最小间隔（约 1 篇/分钟）
+NOTE_SETTLE = (5.0, 9.0)               # 打开笔记页后的随机稳定等待
+COMMENT_SCROLL_INTERVAL = (2.2, 4.5)   # 评论每轮滚动的随机间隔
+COMMENT_BREAK_EVERY = (5, 9)           # 每滚 N 轮进入一次长休（N 随机）
+COMMENT_BREAK = (12.0, 28.0)           # 评论长休时长
+SEARCH_SCROLL_INTERVAL = (2.5, 5.5)    # 搜索每轮滚动的随机间隔
+SEARCH_BREAK_EVERY = (4, 7)            # 每滚 N 轮进入一次长休
+SEARCH_BREAK = (15.0, 35.0)            # 搜索长休时长
+NAV_SETTLE = (3.0, 6.0)                # 导航后的随机稳定等待（首次）
+NAV_RETRY_SETTLE = (6.0, 11.0)         # 导航重试时等待更久
+POLL_INTERVAL = (0.6, 1.1)             # 轮询等待时的随机步长
+
+# 限流退避：首次等待后逐次翻倍，并叠加随机抖动。
+RATE_LIMIT_BACKOFF = (60.0, 90.0)
+RATE_LIMIT_BACKOFF_MAX = 600.0
+
+
+def jitter(span):
+    """返回区间内的随机秒数。"""
+    low, high = span
+    return random.uniform(float(low), float(high))
+
+
+async def sleep_random(span):
+    """按随机区间等待。"""
+    await asyncio.sleep(jitter(span))
 
 
 async def probe_blocked(c, sid):
     return await c.eval('''(function(){
-      const bodyText = document.body ? document.body.innerText : '';
+      // innerText 会为每轮扫描触发布局计算；评论很多时这本身就会把浏览器
+      // 拖慢。这里只做风控关键词探测，使用 textContent 足够且不会强制回流。
+      const bodyText = document.body ? document.body.textContent : '';
       const isVisible = (el) => {
         const s = getComputedStyle(el); const r = el.getBoundingClientRect();
         return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) > 0 && r.width > 0 && r.height > 0;
       };
       const candidates = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[class*="captcha"],[class*="Captcha"],[class*="verify"],[class*="Verify"],[class*="security"],[class*="Security"],iframe')].filter(isVisible);
-      const t = candidates.map(e => (e.innerText || '').trim()).filter(Boolean).join('\\n');
+      // 限流/验证文案只在可见弹窗、遮罩或验证容器里判定。整页 innerText
+      // 会包含笔记正文和推荐内容，直接扫描容易把普通文案当成风控提示。
+      const overlayNodes = candidates.filter(el => {
+        const s = getComputedStyle(el);
+        const role = (el.getAttribute('role') || '').toLowerCase();
+        const identity = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`;
+        const positioned = s.position === 'fixed' || s.position === 'absolute';
+        const frame = el.tagName === 'IFRAME';
+        return role === 'dialog' || (el.getAttribute('aria-modal') || '') === 'true'
+          || positioned || frame || /captcha|verify|security/i.test(identity);
+      });
+      let t = '';
+      for (const el of overlayNodes) t += ((el.textContent || el.innerText || '').trim() + '\\n');
+      const overlayText = t.replace(/\\s+/g, ' ').trim();
       if (location.href.startsWith('chrome-extension:')) return 'bitbrowser拦截';
-      if (/请求太频繁|操作频繁|一分钟后再试|访问频繁/.test(bodyText)) return 'rate_limited';
-      if (/登录后查看|扫码登录/.test(t)) return '登录弹窗';
+      // 小红书限流文案变体很多：“操作过于频繁”“请求太频繁”“访问频繁”等。
+      // 旧正则 /操作频繁/ 匹配不到“操作过于频繁”，限流会被当成正常页面
+      // 继续滚动，进而升级成验证码甚至账号处罚。
+      const rateWords = /请求(?:过于|太)?频繁|操作(?:过于|太)?频繁|访问(?:过于|太)?频繁|操作过快|频率过高/;
+      const retryHint = /一分钟后再试|请?稍后再试/;
+      if (rateWords.test(overlayText)
+          || (retryHint.test(overlayText) && /请求|操作|访问|频繁|频率/.test(overlayText))) return 'rate_limited';
+      // 少数限流提示直接渲染在正文而没有弹窗容器，只对高辨识度短语兜底，
+      // 避免笔记内容里出现“稍后再试”造成误判。
+      if (/(?:请求|操作|访问)(?:过于|太)?频繁[\s\S]{0,24}(?:稍后|再试|分钟)/.test(bodyText)
+          || /一分钟后再试/.test(bodyText)) return 'rate_limited';
+      if (/登录后查看|扫码登录/.test(overlayText)) return '登录弹窗';
       // 小红书的手机号登录有时是整页登录态，不一定挂在 dialog 上。
       // 必须在自动重试/等待前抛给调度器，不能继续刷新页面打断验证码输入。
       if (/\/login(?:[/?#]|$)/.test(location.pathname)
           || /手机号登录|验证码登录|输入手机号|获取验证码/.test(bodyText)) return '登录页面';
-      if (/滑块|拖动验证|滑动验证|安全验证|请完成验证|验证码|人机验证/.test(t)) return '验证码';
+      if (/滑块|拖动验证|滑动验证|安全验证|请完成验证|验证码|人机验证/.test(overlayText)) return '验证码';
       return null;
     })()''', sid)
+
+
+def raise_for_block(reason, retry_after=None):
+    """把 probe_blocked 的结果转成对应异常。
+
+    限流抛 ``RateLimited``（可退避重试），登录/验证码抛 ``HumanBlock``
+    （必须人工处理）。两者分开是避免一次限流就冻结账号的关键。
+    """
+    if not reason:
+        return
+    if reason == "rate_limited":
+        raise RateLimited(retry_after=retry_after)
+    raise HumanBlock(reason)
+
+
+async def check_blocked(c, sid, retry_after=None):
+    """探测风控状态，命中即抛对应异常。"""
+    raise_for_block(await probe_blocked(c, sid), retry_after=retry_after)
 
 
 async def load_feeds(c, sid, keyword, target_count=100,
@@ -75,19 +167,17 @@ async def load_feeds(c, sid, keyword, target_count=100,
     ready = False
     for attempt in range(3):
         await c.navigate(url, sid)
-        await asyncio.sleep(3 + attempt * 2)
+        # 首次导航与重试的稳定等待都随机化：固定「3 + attempt*2 秒」是可被
+        # 平台统计的机器节奏，重试时也更容易连续命中限流。
+        await sleep_random(NAV_SETTLE if attempt == 0 else NAV_RETRY_SETTLE)
         # 在任何 reload 前先确认页面没有真实的人机验证；否则 reload 会把验证页覆盖掉，
         # 造成“没有看到验证却被判定需人工”的错觉。
-        blk = await probe_blocked(c, sid)
-        if blk:
-            raise HumanBlock(blk)
+        await check_blocked(c, sid)
         # 不再执行 location.reload()。人工登录/输入短信验证码可能需要较长时间，
         # 自动刷新会直接清掉手机号和验证码状态。若页面确实是登录页，上一轮
-        # probe_blocked 已经抛出 HumanBlock，调度器会冻结等待人工处理。
-        await asyncio.sleep(2 + attempt)
-        blk = await probe_blocked(c, sid)
-        if blk:
-            raise HumanBlock(blk)
+        # probe_blocked 已经抛出对应异常，调度器会冻结等待人工处理。
+        await sleep_random(NAV_SETTLE)
+        await check_blocked(c, sid)
         for _ in range(12):
             try:
                 ok = await c.eval("""(function(){
@@ -101,18 +191,16 @@ async def load_feeds(c, sid, keyword, target_count=100,
                     break
             except Exception:
                 pass
-            await asyncio.sleep(1.0)
+            await sleep_random(POLL_INTERVAL)
         if ready:
             break
     if not ready:
         raise RuntimeError("小红书搜索结果加载失败：页面未返回有效笔记数据，请检查登录状态或稍后重试")
-    blk = await probe_blocked(c, sid)
-    if blk:
-        raise HumanBlock(blk)
+    await check_blocked(c, sid)
     sort_labels = {"latest": ["最新"], "hot": ["最热", "热门"]}.get(str(search_sort), [])
     if sort_labels:
         await click_sort_option(c, sid, sort_labels)
-        await asyncio.sleep(1.0)
+        await sleep_random(POLL_INTERVAL)
     async def read_feeds():
         try:
             raw = await c.eval('''(function(){
@@ -140,6 +228,10 @@ async def load_feeds(c, sid, keyword, target_count=100,
     # 正常终止条件。正常结束必须是达到目标或确认页面没有更多结果。
     max_rounds = max(80, min(600, target // 8 + 80))
     max_load_wait = 10.0
+    # 连续滚动是搜索阶段最密集的请求来源：每滚 N 轮（随机）插入一次长休，
+    # 把请求密度摊平，而不是等被限流后再补救。
+    scroll_break_every = random.randint(*SEARCH_BREAK_EVERY)
+    scrolls_since_break = 0
     for _ in range(max_rounds):
         rounds += 1
         while pause_event is not None and not pause_event.is_set():
@@ -192,7 +284,7 @@ async def load_feeds(c, sid, keyword, target_count=100,
         # 被无进展计数器误判为没有更多。
         wait_started = asyncio.get_running_loop().time()
         while True:
-            await asyncio.sleep(0.5)
+            await sleep_random(POLL_INTERVAL)
             loaded = await read_feeds()
             before_loaded = len(feeds_by_id)
             for f in loaded:
@@ -203,9 +295,18 @@ async def load_feeds(c, sid, keyword, target_count=100,
                 break
             if asyncio.get_running_loop().time() - wait_started >= max_load_wait:
                 break
-        blk = await probe_blocked(c, sid)
-        if blk:
-            raise HumanBlock(blk)
+        # 每一页加载完成后立刻探测，不能等整个循环结束才发现限流/验证。
+        await check_blocked(c, sid)
+        # 翻页之间保持随机间隔，并按随机轮数插入长休。
+        await sleep_random(SEARCH_SCROLL_INTERVAL)
+        scrolls_since_break += 1
+        if scrolls_since_break >= scroll_break_every:
+            break_seconds = jitter(SEARCH_BREAK)
+            print(f"[节流] 小红书搜索已连续滚动 {scrolls_since_break} 轮，长休 "
+                  f"{break_seconds:.0f}s", flush=True)
+            await asyncio.sleep(break_seconds)
+            scrolls_since_break = 0
+            scroll_break_every = random.randint(*SEARCH_BREAK_EVERY)
     feeds = list(feeds_by_id.values())[:target]
     out = []
     for f in feeds:
@@ -233,15 +334,14 @@ async def load_feeds(c, sid, keyword, target_count=100,
     )
 
 
-async def fetch_note(c, sid, note):
+async def fetch_note(c, sid, note, pause_event=None, cancel_event=None):
     nid = note["id"]
     token = note.get("xsec_token", "")
     url = f"https://www.xiaohongshu.com/explore/{nid}?xsec_token={urllib.parse.quote(token)}&xsec_source=pc_search"
     await c.navigate(url, sid)
-    await asyncio.sleep(4)
-    blk = await probe_blocked(c, sid)
-    if blk:
-        raise HumanBlock(blk)
+    # 固定 4 秒打开详情页是最容易被统计的节奏特征，改为随机稳定等待。
+    await sleep_random(NOTE_SETTLE)
+    await check_blocked(c, sid)
     detail = await c.eval('''(function(){
       const s = window.__INITIAL_STATE__;
       if (!s || !s.note) return {err:'no state'};
@@ -275,18 +375,20 @@ async def fetch_note(c, sid, note):
       const candidates = [
         ...scope.querySelectorAll('.show-more,[class*="show-more"]'),
         ...scope.querySelectorAll('.comment-item button,.comment-item [role="button"],'
-          + '.comment-item a,.comment-item span,.comment-item div')
+          + '.comment-item a,.comment-item [class*="reply"],'
+          + '.comment-item [class*="Reply"],.comment-item [class*="more"],'
+          + '.comment-item [class*="More"]')
       ];
       for (const el of candidates) {
           const label = clean(el.getAttribute('aria-label') || el.getAttribute('title')
-            || el.innerText || el.textContent);
+            || el.textContent || el.innerText);
           if (!isExpandLabel(label)) continue;
           const control = el.closest('button,[role="button"],a') || el;
           if (visible(control)) controls.add(control);
       }
       const clicked = [];
       for (const control of controls) {
-        const label = clean(control.innerText || control.textContent).slice(0, 80);
+        const label = clean(control.textContent || control.innerText).slice(0, 80);
         control.focus?.();
         control.click();
         clicked.push(label);
@@ -295,10 +397,24 @@ async def fetch_note(c, sid, note):
     })()'''
     idle_rounds = 0
     previous_count = 0
+    # 评论滚动是详情页里请求最密集的动作。旧实现整段循环没有任何风控探测，
+    # 只在进入循环前检查一次，于是被限流后会对着限流页继续滚 60~90 秒，
+    # 把「限流」升级成「验证码」。这里每轮都探测，命中立即中断。
+    scroll_break_every = random.randint(*COMMENT_BREAK_EVERY)
+    scrolls_since_break = 0
     for _ in range(80):
+        # 暂停/取消必须可响应：激进降频下单篇笔记的评论滚动可能持续数分钟，
+        # 旧实现完全不检查事件，用户点停止后仍会继续滚到本轮结束。
+        while pause_event is not None and not pause_event.is_set():
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            await asyncio.sleep(0.2)
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        await check_blocked(c, sid)
         await c.eval(expand_replies_js, sid)
         state = await c.eval('''(() => {
-          const text = document.body?.innerText || '';
+          const text = document.body?.textContent || '';
           const nodes = [...document.querySelectorAll('.comment-item')];
           const candidates = [
             ...document.querySelectorAll('.comment-mainContent, .comment-container, '
@@ -328,34 +444,49 @@ async def fetch_note(c, sid, note):
           else window.scrollTo(0, document.body.scrollHeight);
           return !!scroller;
         })()''', sid)
-        await asyncio.sleep(0.7)
+        await sleep_random(POLL_INTERVAL)
         await c.eval(expand_replies_js, sid)
+        # 滚动本身才真正触发评论接口请求，滚完立刻再探测一次并保持随机间隔。
+        await check_blocked(c, sid)
+        await sleep_random(COMMENT_SCROLL_INTERVAL)
+        scrolls_since_break += 1
+        if scrolls_since_break >= scroll_break_every:
+            break_seconds = jitter(COMMENT_BREAK)
+            print(f"[节流] 小红书评论已连续滚动 {scrolls_since_break} 轮，长休 "
+                  f"{break_seconds:.0f}s", flush=True)
+            await asyncio.sleep(break_seconds)
+            scrolls_since_break = 0
+            scroll_break_every = random.randint(*COMMENT_BREAK_EVERY)
     comments = await c.eval('''(function(){
       const out = []; const seen = new Set();
-      const body = document.body ? document.body.innerText : '';
+      const body = document.body ? document.body.textContent : '';
       if (body.includes('这是一片荒地') || body.includes('暂无评论')) return {desert:true, comments:[]};
       // 每条评论即一个 .comment-item（含头像、昵称、文本、日期-地区、赞、回复）
       const nodes = [...document.querySelectorAll('.comment-item')];
+      const textOf = el => String(el?.textContent || '').replace(/\s+/g, ' ').trim();
       for (const n of nodes) {
         let user = '', user_id = '';
         // 评论者主页 userId
         const uidEl = n.querySelector('a[data-user-id]');
-        if (uidEl) { user_id = uidEl.getAttribute('data-user-id') || ''; user = (uidEl.innerText||'').trim(); }
+        if (uidEl) { user_id = uidEl.getAttribute('data-user-id') || ''; user = textOf(uidEl); }
         if (!user) {
           // 兜底：第一个非空文本块视为昵称（部分评论头像链接无文字）
           const nameEl = n.querySelector('.name, .user-name, span');
-          user = nameEl ? (nameEl.innerText||'').trim() : '';
+          user = nameEl ? textOf(nameEl) : '';
         }
-        const lines = (n.innerText||'').split(String.fromCharCode(10)).filter(Boolean);
-        // 小红书会把“作者”身份徽标放在评论行内部；如果真实正文为空、
-        // 图片或表情，直接读取整行文本会把这个徽标误当成评论正文。
-        // 先读取正文节点，回退到整行时也必须排除全部界面元数据。
         const contentEl = n.querySelector(
           '.comment-mainContent, .comment-content, .comment-text, '
           + '[class*="commentContent"], [class*="comment-content"]'
         );
+        // 大量评论时 innerText 会反复触发布局计算；只有找不到正文节点时
+        // 才使用它做兼容兜底，正常路径统一读取 textContent。
+        const nodeText = contentEl ? textOf(n) : String(n.innerText || n.textContent || '');
+        const lines = nodeText.split(String.fromCharCode(10)).filter(Boolean);
+        // 小红书会把“作者”身份徽标放在评论行内部；如果真实正文为空、
+        // 图片或表情，直接读取整行文本会把这个徽标误当成评论正文。
+        // 先读取正文节点，回退到整行时也必须排除全部界面元数据。
         const contentLines = contentEl
-          ? (contentEl.innerText||'').split(String.fromCharCode(10)).filter(Boolean)
+          ? textOf(contentEl).split(String.fromCharCode(10)).filter(Boolean)
           : lines;
         const metadataLabels = new Set(['赞', '回复', '作者', '作者回复', '展开', '收起', '更多', '分享', '删除', '举报']);
         // text：跳过昵称、日期地区和操作/身份标签，取第一条真实正文
@@ -369,8 +500,8 @@ async def fetch_note(c, sid, note):
         // 只从当前评论自己的日期节点读取，避免整页/整条楼中楼容器中
         // 混入作品发布日期或其它评论日期。明确年份与无年份使用互斥规则，
         // 防止“2025-12-25”被降级匹配成“12-25”。
-        const dateText = (n.querySelector('.date')?.innerText || '').trim();
-        const full = dateText || (n.innerText || '');
+        const dateText = textOf(n.querySelector('.date'));
+        const full = dateText || nodeText;
         const explicitDate = full.match(/(?:^|\\n)\\s*(\\d{4})\\s*[-/年]\\s*(\\d{1,2})\\s*[-/月]\\s*(\\d{1,2})日?\\s*([\\u4e00-\\u9fff]{2,8})?/);
         const currentDate = explicitDate ? null : full.match(/(?:^|\\n)\\s*(\\d{1,2})\\s*[-/月]\\s*(\\d{1,2})日?\\s*([\\u4e00-\\u9fff]{2,8})?/);
         const rawTime = explicitDate
@@ -421,23 +552,38 @@ async def run(ws_url, keywords, target_notes, target_comments, cooldown):
                     break
                 if f["id"] in done_ids:
                     continue
-                try:
-                    note = await fetch_note(c, sid, f)
-                    if note.get("err"):
-                        continue
-                    note["keyword"] = kw
-                    notes.append(note)
-                    done_ids.add(f["id"])
-                    json.dump(notes, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-                    cur_c = sum(len(n2["comments"]) for n2 in notes)
-                    print(f"  ✅ {len(notes)}篇 | {note['title'][:16]} | 💬{len(note['comments'])} | 累计评论{cur_c}")
-                    if cooldown > 0:
-                        await asyncio.sleep(cooldown)
-                except HumanBlock as hb:
-                    raise
-                except Exception as e:
-                    print(f"  ⚠️ {f['title'][:16]} 异常 {repr(e)[:60]}")
-                    await asyncio.sleep(2)
+                # 限流是暂时性的：先按退避等待重试同一篇，重试耗尽才交给上层
+                # 决定是否冻结账号。旧实现遇到限流直接抛 HumanBlock 冻结。
+                backoff = jitter(RATE_LIMIT_BACKOFF)
+                for attempt in range(3):
+                    try:
+                        note = await fetch_note(c, sid, f)
+                        if note.get("err"):
+                            break
+                        note["keyword"] = kw
+                        notes.append(note)
+                        done_ids.add(f["id"])
+                        json.dump(notes, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+                        cur_c = sum(len(n2["comments"]) for n2 in notes)
+                        print(f"  ✅ {len(notes)}篇 | {note['title'][:16]} | 💬{len(note['comments'])} | 累计评论{cur_c}")
+                        # 篇间间隔取「任务冷却」与「安全下限」的较大值，并保留随机性。
+                        wait = max(float(cooldown or 0), jitter(NOTE_MIN_INTERVAL))
+                        await asyncio.sleep(wait)
+                        break
+                    except RateLimited as rl:
+                        if attempt >= 2:
+                            raise
+                        wait = min(backoff * (2 ** attempt), RATE_LIMIT_BACKOFF_MAX)
+                        wait += jitter((0.0, 15.0))
+                        print(f"  ⏳ 触发限流（{rl}），退避 {wait:.0f}s 后重试 "
+                              f"({attempt + 1}/3)", flush=True)
+                        await asyncio.sleep(wait)
+                    except HumanBlock:
+                        raise
+                    except Exception as e:
+                        print(f"  ⚠️ {f['title'][:16]} 异常 {repr(e)[:60]}")
+                        await asyncio.sleep(2)
+                        break
     finally:
         await c.close()
     total_c = sum(len(n["comments"]) for n in notes)
@@ -466,3 +612,6 @@ if __name__ == "__main__":
     except HumanBlock as hb:
         print(f"\n🚨 P7 冻结: {hb}")
         sys.exit(3)
+    except RateLimited as rl:
+        print(f"\n⏳ 限流未恢复，已退出等待下次调度: {rl}")
+        sys.exit(4)

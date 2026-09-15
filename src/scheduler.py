@@ -51,7 +51,9 @@ BitBrowser 对接位（本阶段不启用）:
 import datetime
 import inspect
 import json as _json
+import math
 import os
+import queue
 import sqlite3
 import threading
 import time
@@ -81,6 +83,11 @@ __all__ = [
 _RUNTIME_ACCOUNT_STATUSES = frozenset({"working", "cooldown"})
 _RUNTIME_HEARTBEAT_INTERVAL = 2.0
 _RUNTIME_LEASE_TIMEOUT = 15.0
+
+# 评论采集本身应优先完成落库。达到这个数量后，线索同步和意图分析改由
+# 单独的后台线程串行处理，避免采集 worker 对每条评论反复 commit/查表，
+# 导致浏览器、GUI 和任务状态一起长时间无响应。
+_LARGE_COMMENT_BATCH_SIZE = 100
 
 # 账号表允许本调度器直接写入的列（契约 DDL 核心字段，白名单防手滑）
 _ACCT_WRITABLE = {
@@ -250,6 +257,10 @@ class Scheduler:
         self._intent_batch_processor = IntentBatchProcessor(
             db_path, log_callback=self._emit_log
         )
+        self._comment_enrichment_queue = queue.Queue()
+        self._comment_enrichment_stop = threading.Event()
+        self._comment_enrichment_lock = threading.RLock()
+        self._comment_enrichment_thread = None
         # GUI 可注入的运行日志回调；未注入时仍保留 stdout 兼容行为。
         self.log_callback = None
         self._log_file_lock = threading.Lock()
@@ -468,6 +479,74 @@ class Scheduler:
             )
         except Exception as exc:  # noqa: BLE001
             self._emit_log(f"[intent] 评论 {comment_id} 批处理触发失败：{type(exc).__name__}: {exc}")
+
+    def _ensure_comment_enrichment_worker(self) -> None:
+        """按需启动评论扩展线程；线程使用独立 SQLite 连接，不阻塞采集 worker。"""
+        with self._comment_enrichment_lock:
+            thread = self._comment_enrichment_thread
+            if thread is not None and thread.is_alive():
+                return
+            if self._comment_enrichment_stop.is_set():
+                # close_connections=True 后允许同一个 Scheduler 重新 start。
+                self._comment_enrichment_stop.clear()
+            thread = threading.Thread(
+                target=self._comment_enrichment_loop,
+                name="comment-enrichment",
+                daemon=True,
+            )
+            self._comment_enrichment_thread = thread
+            thread.start()
+
+    def _queue_comment_enrichment(self, jobs: list[tuple]) -> None:
+        """提交一批评论的线索/意图扩展；只排队，不在采集线程等待。"""
+        if not jobs:
+            return
+        self._ensure_comment_enrichment_worker()
+        self._comment_enrichment_queue.put(list(jobs))
+        self._emit_log(
+            f"[scheduler] 大评论批次已落库：{len(jobs)} 条，线索/意图处理转入后台"
+        )
+
+    def _comment_enrichment_loop(self) -> None:
+        """后台串行消费评论扩展任务，控制数据库写入并发。"""
+        while not self._comment_enrichment_stop.is_set():
+            try:
+                jobs = self._comment_enrichment_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            try:
+                self._process_comment_enrichment(jobs)
+            except Exception as exc:  # noqa: BLE001
+                # 扩展失败不能回滚已经完成的评论采集，也不能杀死后台线程。
+                self._emit_log(
+                    f"[scheduler] 评论后台处理批次失败：{type(exc).__name__}: {exc}"
+                )
+            finally:
+                self._comment_enrichment_queue.task_done()
+
+    def _process_comment_enrichment(self, jobs: list[tuple]) -> None:
+        """使用独立连接处理一批已提交评论，避免跨线程复用采集连接。"""
+        conn = db.init_db(self.db_path, check_same_thread=False)
+        try:
+            lead_service = self._build_lead_service(conn)
+            intent_items = []
+            for comment_id, task_id, video_id, comment in jobs:
+                if self._comment_enrichment_stop.is_set():
+                    return
+                self._ingest_comment_to_lead(
+                    conn, comment_id, lead_service,
+                    task_id=task_id, video_id=video_id,
+                )
+                intent_items.append((comment_id, comment))
+            if intent_items and not self._comment_enrichment_stop.is_set():
+                self._intent_batch_processor.on_comments(
+                    intent_items, task_id=jobs[0][1]
+                )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _record_task_error(conn, task_id: int, detail: str) -> None:
@@ -2603,11 +2682,15 @@ class Scheduler:
                 evt.clear()
                 evt.wait(timeout=cooldown_left)
                 db.reset_batch(conn, account_id)
+                local_batch = 0
                 if self._stop.is_set() or self._task_stop_requested(task_id):
                     # 暂停/停止期间不再把冷却后的账号写回 working；finally
                     # 会把账号收敛到 idle（人工冻结除外）。
                     conn.commit()
                     return
+            # 断点恢复后无法知道本批次已在采集器内运行了多久，按当前 worker
+            # 启动时刻重新计时，宁可少减也不让恢复流程跳过应有的保护时间。
+            batch_started_at = time.monotonic() if local_batch else None
             acct_row = conn.execute(
                 "SELECT bb_window_id FROM accounts WHERE id = ?", (account_id,)
             ).fetchone()
@@ -2645,8 +2728,11 @@ class Scheduler:
 
                 if not self._claim_video(conn, vid["id"]):
                     continue  # 已被并发抢走（防御；正常不会发生）
+                if local_batch == 0 and batch_started_at is None:
+                    batch_started_at = time.monotonic()
 
                 try:
+                    defer_comment_enrichment = False
                     # 真实对接位（本阶段不启用）：window = self.bb.open_browser(...)
                     import json
                     collect_types = task.get("collect_types") or []
@@ -2674,6 +2760,9 @@ class Scheduler:
                             f"[scheduler] 任务 {task_id} 账号 {account_name} 作品 {vid['vid']} "
                             f"评论采集完成：{len(comments)} 条"
                         )
+                    platform = task.get("platform", "douyin")
+                    defer_comment_enrichment = len(comments) >= _LARGE_COMMENT_BATCH_SIZE
+                    deferred_jobs = []
                     for c in comments:
                         extra = c.get("extra") or {}
                         if not isinstance(extra, dict):
@@ -2695,18 +2784,32 @@ class Scheduler:
                         intent_score = c.get("intent_score", 0) if "intent" in collect_types else 0
                         intent_label = c.get("intent_label") if "intent" in collect_types else None
                         reply_suggestion = c.get("reply_suggestion") if "intent" in collect_types else None
-                        comment_id = db.insert_comment(
+                        inserted_result = db.insert_comment(
                             conn, vid["id"], user_id, nickname,
                             c.get("content") if "comments" in collect_types else None,
                             c.get("comment_time"), extra=extra,
                             intent_score=intent_score,
                             intent_label=intent_label,
                             reply_suggestion=reply_suggestion,
-                            platform=task.get("platform", "douyin"),
+                            platform=platform,
+                            commit=not defer_comment_enrichment,
+                            return_inserted=defer_comment_enrichment,
                         )
-                        self._handle_collected_comment(
-                            conn, comment_id, lead_service,
-                            task_id=task_id, video_id=vid["id"], comment=c)
+                        if defer_comment_enrichment:
+                            comment_id, inserted = inserted_result
+                            if inserted:
+                                deferred_jobs.append(
+                                    (comment_id, task_id, vid["id"], dict(c))
+                                )
+                        else:
+                            self._handle_collected_comment(
+                                conn, inserted_result, lead_service,
+                                task_id=task_id, video_id=vid["id"], comment=c)
+                    if defer_comment_enrichment:
+                        # 评论先整体提交，再交给后台扩展线程；否则后台连接可能
+                        # 在采集连接尚未提交时读不到刚刚落库的评论。
+                        conn.commit()
+                        self._queue_comment_enrichment(deferred_jobs)
                     if self._stop.is_set() or self._task_stop_requested(task_id):
                         # 取消可能发生在评论写入之后、完成标记之前；保留
                         # assigned 状态，恢复时会从同一作品断点继续。
@@ -2718,16 +2821,31 @@ class Scheduler:
                     local_batch += 1
                     conn.commit()
                     if local_batch >= batch_size and self._has_more(conn, task_id, account_id, account_name):
+                        effective_cd = self._effective_batch_cooldown(
+                            task.get("platform", "douyin"), cd_seconds, batch_started_at
+                        )
+                        if effective_cd < cd_seconds and str(task.get("platform", "")).lower() in (
+                            "xhs", "xiaohongshu", "小红书"
+                        ):
+                            self._emit_log(
+                                f"[scheduler] 小红书批次已在采集期间完成 {cd_seconds - effective_cd}s，"
+                                f"本轮仅补冷却 {effective_cd}s"
+                            )
                         self._do_cooldown(
-                            conn, account_id, account_name, cd_seconds, task_id=task_id
+                            conn, account_id, account_name, effective_cd, task_id=task_id
                         )
                         local_batch = 0
+                        batch_started_at = None
                 except HumanInterventionRequired as h:
                     # P7：冻结账号，等待用户处理；该视频保持 collecting（恢复后续采）
+                    if defer_comment_enrichment:
+                        conn.rollback()
                     self._emit_log(f"[scheduler] 账号 {account_name} 需要人工接管（{h.reason}），冻结等待恢复…")
                     self.mark_human_waiting(account_id, h.reason, task_id=task_id)
                 except Exception as e:  # noqa: BLE001
                     detail = f"{type(e).__name__}: {e}".strip()
+                    if defer_comment_enrichment:
+                        conn.rollback()
                     if self._stop.is_set() or self._task_stop_requested(task_id):
                         self._release_video_for_retry(conn, vid["id"])
                         conn.commit()
@@ -2875,6 +2993,24 @@ class Scheduler:
         )
         r = cur.fetchone()
         return bool(r and r["c"] > 0)
+
+    @staticmethod
+    def _effective_batch_cooldown(platform, cooldown_seconds, batch_started_at):
+        """计算批次剩余冷却，避免小红书采集器的等待被重复叠加。
+
+        小红书详情采集本身已经按笔记间隔和评论加载耗时限速。仅对小红书把
+        ``cooldown_seconds`` 视为“批次最短总时长”的补足值；其它平台保持原有
+        “批次完成后完整等待”的语义。``batch_started_at`` 为空时保守返回完整
+        冷却，兼容断点恢复和旧的调用方式。
+        """
+        requested = max(0, int(cooldown_seconds or 0))
+        if requested <= 0 or batch_started_at is None:
+            return requested
+        normalized = str(platform or "").strip().lower()
+        if normalized not in ("xhs", "xiaohongshu", "小红书"):
+            return requested
+        elapsed = max(0.0, time.monotonic() - float(batch_started_at))
+        return max(0, int(math.ceil(requested - elapsed)))
 
     def _do_cooldown(self, conn, account_id: int, account_name: str, cd_seconds: int,
                      task_id: int | None = None):
@@ -3294,6 +3430,11 @@ class Scheduler:
             self._intent_batch_processor.close()
         except Exception:
             pass
+        if close_connections:
+            self._comment_enrichment_stop.set()
+            enrichment_thread = self._comment_enrichment_thread
+            if enrichment_thread is not None and enrichment_thread is not threading.current_thread():
+                enrichment_thread.join(timeout=1.5)
         with self._lock:
             self._global_paused = False
             for evt in list(self._pause_evts.values()):
