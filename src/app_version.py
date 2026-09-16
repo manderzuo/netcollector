@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-DEFAULT_APP_VERSION = "2.2.5"
+DEFAULT_APP_VERSION = "2.2.6"
 
 
 def _read_version() -> str:

@@ -1,1 +1,1 @@
-20260915-2.2.5-nested-reply-v1
+20260916-2.2.6-batch-processing-stability-v1
