@@ -31,16 +31,39 @@ function Invoke-RuntimeCommand([string]$Python, [string[]]$Arguments) {
     }
 }
 
-function Test-PySide6([string]$Python) {
+function Test-RuntimeCommand([string]$Python, [string[]]$Arguments, [string]$Label) {
     if (-not $Python -or -not (Test-Path -LiteralPath $Python -PathType Leaf)) { return $false }
-    & $Python -c 'import PySide6' *> $null
-    return $LASTEXITCODE -eq 0
+
+    # Windows PowerShell 5.1 can turn stderr from a native process into a
+    # terminating NativeCommandError when the caller uses ErrorAction Stop.
+    # A failed import/version probe is expected and must become a false result
+    # so the repair path can continue.
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $Python @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            Write-RuntimeBootstrapLog ($Label + '_failed exit=' + $exitCode)
+            foreach ($line in $output) {
+                Write-RuntimeBootstrapLog ([string]$line)
+            }
+        }
+        return $exitCode -eq 0
+    } catch {
+        Write-RuntimeBootstrapLog ($Label + '_exception error=' + $_.Exception.Message)
+        return $false
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+}
+
+function Test-PySide6([string]$Python) {
+    return (Test-RuntimeCommand -Python $Python -Arguments @('-c', 'import PySide6') -Label 'pyside6_import')
 }
 
 function Test-Pip([string]$Python) {
-    if (-not $Python -or -not (Test-Path -LiteralPath $Python -PathType Leaf)) { return $false }
-    & $Python -m pip --version *> $null
-    return $LASTEXITCODE -eq 0
+    return (Test-RuntimeCommand -Python $Python -Arguments @('-m', 'pip', '--version') -Label 'pip_probe')
 }
 
 function Install-QmlRequirements([string]$Python, [string]$AppRoot) {
@@ -62,11 +85,27 @@ function Install-QmlRequirements([string]$Python, [string]$AppRoot) {
         return $false
     }
 
-    Write-RuntimeBootstrapLog ('install_start python=' + $Python + ' requirements=' + $requirements)
-    $installCode = Invoke-RuntimeCommand $Python @(
+    $wheelhouse = Join-Path $AppRoot 'need\python-wheels'
+    $onlineArguments = @(
         '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
         '--timeout', '120', '-r', $requirements
     )
+    $installCode = 1
+    if (Test-Path -LiteralPath $wheelhouse -PathType Container) {
+        Write-RuntimeBootstrapLog ('install_start source=local_wheelhouse python=' + $Python + ' requirements=' + $requirements)
+        $localArguments = @(
+            '-m', 'pip', 'install', '--disable-pip-version-check', '--no-input',
+            '--no-index', '--find-links', $wheelhouse, '-r', $requirements
+        )
+        $installCode = Invoke-RuntimeCommand $Python $localArguments
+        if ($installCode -ne 0) {
+            Write-RuntimeBootstrapLog 'local_install_failed_retry=internet'
+            $installCode = Invoke-RuntimeCommand $Python $onlineArguments
+        }
+    } else {
+        Write-RuntimeBootstrapLog ('install_start source=internet python=' + $Python + ' requirements=' + $requirements)
+        $installCode = Invoke-RuntimeCommand $Python $onlineArguments
+    }
     Write-RuntimeBootstrapLog ('install_exit=' + $installCode)
     return $installCode -eq 0 -and (Test-PySide6 $Python)
 }
