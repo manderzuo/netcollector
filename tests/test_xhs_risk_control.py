@@ -66,6 +66,19 @@ class _BulkCommentCollector(Collector):
             for idx in range(120)
         ]
 
+
+class _SmallCommentCollector(Collector):
+    """产生少量评论，验证小批次也不再走逐条扩展路径。"""
+
+    def search(self, *args, **kwargs):
+        return [{"vid": "small-video", "url": "https://example.test/small"}]
+
+    def fetch_comments(self, *args, **kwargs):
+        return [
+            {"user_id": f"small-u-{idx}", "nickname": f"小用户{idx}", "content": f"小评论{idx}"}
+            for idx in range(3)
+        ]
+
 def _bare_ctx():
     """构造不带事件循环与线程的 _PlatformCtx，只测纯逻辑。"""
     return live_collector._PlatformCtx.__new__(live_collector._PlatformCtx)
@@ -307,6 +320,57 @@ class LargeCommentPipelineTests(unittest.TestCase):
                         scheduler.conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0],
                         120,
                     )
+            finally:
+                scheduler.shutdown(close_connections=True)
+
+    def test_small_comment_collection_also_queues_one_batch_after_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "scheduler.db")
+            scheduler = Scheduler(path, collector=_SmallCommentCollector())
+            scheduler.add_account("small-account", "small-window", "douyin")
+            task_id = scheduler.create_task(
+                "小批量评论", target_count=1, task_accounts=["small-account"],
+                batch_size=1, cooldown_seconds=0,
+            )
+            try:
+                with mock.patch.object(scheduler, "_queue_comment_enrichment") as enqueue:
+                    scheduler.start(task_id)
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline:
+                        if scheduler.status_report()["tasks"][task_id]["status"] == "done":
+                            break
+                        time.sleep(0.03)
+                    self.assertEqual(
+                        scheduler.status_report()["tasks"][task_id]["status"], "done"
+                    )
+                    enqueue.assert_called_once()
+                    jobs = enqueue.call_args.args[0]
+                    self.assertEqual(len(jobs), 3)
+                    self.assertEqual(
+                        scheduler.conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0],
+                        3,
+                    )
+            finally:
+                scheduler.shutdown(close_connections=True)
+
+    def test_comment_enrichment_worker_coalesces_adjacent_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "scheduler.db")
+            scheduler = Scheduler(path, collector=_SmallCommentCollector())
+            try:
+                scheduler._ensure_comment_enrichment_worker()
+                with mock.patch.object(scheduler, "_process_comment_enrichment") as process:
+                    scheduler._comment_enrichment_queue.put([
+                        (1, 11, 101, {"content": "第一条"}),
+                    ])
+                    scheduler._comment_enrichment_queue.put([
+                        (2, 11, 101, {"content": "第二条"}),
+                    ])
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline and not process.called:
+                        time.sleep(0.02)
+                    process.assert_called_once()
+                    self.assertEqual(len(process.call_args.args[0]), 2)
             finally:
                 scheduler.shutdown(close_connections=True)
 

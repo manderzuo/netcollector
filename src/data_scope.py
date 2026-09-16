@@ -63,7 +63,7 @@ class SyncStore:
 
     def enqueue(self, owner_user_id: int, entity_type: str, entity_id: int | None,
                 payload: Mapping[str, Any] | None = None,
-                operation: str = "upsert") -> int:
+                operation: str = "upsert", *, commit: bool = True) -> int:
         owner_user_id = int(owner_user_id)
         if owner_user_id <= 0:
             raise ValueError("同步数据必须绑定员工账号")
@@ -79,7 +79,8 @@ class SyncStore:
                         ensure_ascii=False, default=str),
              event_id, stamp, stamp),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return int(cur.lastrowid)
 
     def pending(self, owner_user_id: int, limit: int = 100) -> list[dict[str, Any]]:

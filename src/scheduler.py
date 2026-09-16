@@ -84,10 +84,11 @@ _RUNTIME_ACCOUNT_STATUSES = frozenset({"working", "cooldown"})
 _RUNTIME_HEARTBEAT_INTERVAL = 2.0
 _RUNTIME_LEASE_TIMEOUT = 15.0
 
-# 评论采集本身应优先完成落库。达到这个数量后，线索同步和意图分析改由
-# 单独的后台线程串行处理，避免采集 worker 对每条评论反复 commit/查表，
-# 导致浏览器、GUI 和任务状态一起长时间无响应。
-_LARGE_COMMENT_BATCH_SIZE = 100
+# 评论采集本身应优先完成落库。线索同步和意向分析统一转到单独的后台
+# 线程，并按批次处理；即使评论量很小，也不能回到逐条建连接、查表和广播
+# 日志的旧路径。队列线程会把短时间内到达的多个作品合并到这个上限。
+_COMMENT_ENRICHMENT_BATCH_SIZE = 500
+_COMMENT_ENRICHMENT_COALESCE_SECONDS = 0.15
 
 # 账号表允许本调度器直接写入的列（契约 DDL 核心字段，白名单防手滑）
 _ACCT_WRITABLE = {
@@ -263,10 +264,17 @@ class Scheduler:
         self._comment_enrichment_thread = None
         # GUI 可注入的运行日志回调；未注入时仍保留 stdout 兼容行为。
         self.log_callback = None
-        self._log_file_lock = threading.Lock()
         self._log_path = os.path.join(
             os.path.dirname(os.path.abspath(db_path)), "logs", "scheduler.log"
         )
+        # 日志不能在采集线程里逐条打开文件写入。高评论量时日志事件会
+        # 瞬间增多，改为有界队列 + 单独写入线程，避免磁盘 IO 反向拖住采集。
+        self._log_queue = queue.Queue(maxsize=20000)
+        self._log_writer_stop = threading.Event()
+        self._log_writer_thread = threading.Thread(
+            target=self._log_writer_loop, name="scheduler-log-writer", daemon=True
+        )
+        self._log_writer_thread.start()
         # 运行租约用于跨进程区分“当前仍在采集”和“上次进程异常退出后的残留”。
         # 同一进程内即使意外创建了两个 Scheduler，也会使用各自租约，避免
         # 一个实例关闭时误清理另一个实例正在使用的账号。
@@ -314,24 +322,31 @@ class Scheduler:
         self._monitor_runner = None
         self._waiting_restart_inflight = False
         self._closed = False
+        self._status_report_cache_lock = threading.Lock()
+        self._status_report_build_lock = threading.Lock()
+        self._status_report_cache = None
+        self._status_report_cache_at = 0.0
+        self._status_report_cache_ttl = 0.75
+        self._state_reconcile_lock = threading.Lock()
+        self._last_state_reconcile_at = 0.0
         # 进程启动时先修正旧版本/异常退出留下的工作状态。只清理没有
         # 活动线程且租约已经失效的 working/cooldown，不触碰任务、作品、评论。
         self._reconcile_stale_account_states()
         # 任务状态也会跨 GUI 重启持久化；没有线程跟随进程恢复时，
         # 采集中状态必须落成可续跑的暂停，而不能继续显示假运行。
         self._reconcile_stale_task_states()
+        self._last_state_reconcile_at = time.monotonic()
 
     def _emit_log(self, message: str) -> None:
         """统一输出后台日志，同时持久化，便于复盘阶段切换和停止原因。"""
         text = str(message)
         print(text)
         try:
-            os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
-            with self._log_file_lock:
-                with open(self._log_path, "a", encoding="utf-8") as f:
-                    f.write(f"[{_now_iso()}] [{threading.current_thread().name}] {text}\n")
-        except Exception:
-            # 日志写入失败不能影响采集任务本身。
+            self._log_queue.put_nowait(
+                f"[{_now_iso()}] [{threading.current_thread().name}] {text}\n"
+            )
+        except queue.Full:
+            # 日志队列满时保留 stdout 和 GUI 回调，不能反过来阻塞采集线程。
             pass
         callback = self.log_callback
         if callable(callback):
@@ -339,6 +354,42 @@ class Scheduler:
                 callback(text)
             except Exception:
                 pass
+
+    def _log_writer_loop(self) -> None:
+        """批量追加调度日志；退出时尽量排空队列。"""
+        try:
+            os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
+        except Exception:
+            pass
+        while not self._log_writer_stop.is_set() or not self._log_queue.empty():
+            batch = []
+            try:
+                batch.append(self._log_queue.get(timeout=0.2))
+            except queue.Empty:
+                continue
+            while len(batch) < 200:
+                try:
+                    batch.append(self._log_queue.get_nowait())
+                except queue.Empty:
+                    break
+            try:
+                with open(self._log_path, "a", encoding="utf-8") as stream:
+                    stream.writelines(batch)
+                    stream.flush()
+            except Exception:
+                # 日志写入失败不能影响采集任务本身。
+                pass
+            finally:
+                for _ in batch:
+                    self._log_queue.task_done()
+
+    def _stop_log_writer(self, timeout: float = 3.0) -> None:
+        thread = getattr(self, "_log_writer_thread", None)
+        if thread is None:
+            return
+        self._log_writer_stop.set()
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, float(timeout)))
 
     @staticmethod
     def _build_lead_service(conn):
@@ -468,17 +519,12 @@ class Scheduler:
 
     def _handle_collected_comment(self, conn, comment_id, lead_service=None,
                                   *, task_id=None, video_id=None, comment=None):
-        """评论入线索后触发意向批处理；触发失败不影响采集。"""
-        self._ingest_comment_to_lead(
-            conn, comment_id, lead_service,
-            task_id=task_id, video_id=video_id,
-        )
-        try:
-            self._intent_batch_processor.on_comment(
-                comment_id, task_id=task_id, comment=comment
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._emit_log(f"[intent] 评论 {comment_id} 批处理触发失败：{type(exc).__name__}: {exc}")
+        """兼容旧内部调用；单条评论也必须走统一批处理队列。"""
+        if comment_id is None:
+            return
+        self._queue_comment_enrichment([
+            (comment_id, task_id, video_id, dict(comment or {})),
+        ])
 
     def _ensure_comment_enrichment_worker(self) -> None:
         """按需启动评论扩展线程；线程使用独立 SQLite 连接，不阻塞采集 worker。"""
@@ -504,43 +550,131 @@ class Scheduler:
         self._ensure_comment_enrichment_worker()
         self._comment_enrichment_queue.put(list(jobs))
         self._emit_log(
-            f"[scheduler] 大评论批次已落库：{len(jobs)} 条，线索/意图处理转入后台"
+            f"[scheduler] 评论批次已落库：{len(jobs)} 条，线索/意图处理转入后台"
         )
 
     def _comment_enrichment_loop(self) -> None:
-        """后台串行消费评论扩展任务，控制数据库写入并发。"""
-        while not self._comment_enrichment_stop.is_set():
+        """后台串行消费评论扩展任务，并合并短时间内到达的评论批次。"""
+        # stop 只表示“不再消费新的空闲轮询”，已有队列必须先排空。
+        # 这样应用退出时不会在数据库连接关闭前丢失评论扩展任务。
+        while not self._comment_enrichment_stop.is_set() or not self._comment_enrichment_queue.empty():
+            queue_items = 0
             try:
                 jobs = self._comment_enrichment_queue.get(timeout=0.25)
+                queue_items = 1
             except queue.Empty:
                 continue
             try:
-                self._process_comment_enrichment(jobs)
+                merged_jobs = list(jobs or [])
+                deadline = time.monotonic() + _COMMENT_ENRICHMENT_COALESCE_SECONDS
+                while len(merged_jobs) < _COMMENT_ENRICHMENT_BATCH_SIZE:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        next_jobs = self._comment_enrichment_queue.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    queue_items += 1
+                    merged_jobs.extend(next_jobs or [])
+                self._process_comment_enrichment(merged_jobs)
             except Exception as exc:  # noqa: BLE001
                 # 扩展失败不能回滚已经完成的评论采集，也不能杀死后台线程。
                 self._emit_log(
                     f"[scheduler] 评论后台处理批次失败：{type(exc).__name__}: {exc}"
                 )
             finally:
-                self._comment_enrichment_queue.task_done()
+                for _ in range(queue_items):
+                    self._comment_enrichment_queue.task_done()
 
     def _process_comment_enrichment(self, jobs: list[tuple]) -> None:
         """使用独立连接处理一批已提交评论，避免跨线程复用采集连接。"""
         conn = db.init_db(self.db_path, check_same_thread=False)
         try:
             lead_service = self._build_lead_service(conn)
+            task_ids = {
+                int(item[1]) for item in jobs
+                if len(item) > 1 and item[1] is not None
+            }
+            owner_by_task = {}
+            if task_ids:
+                marks = ",".join("?" for _ in task_ids)
+                owner_rows = conn.execute(
+                    f"SELECT id, owner_user_id FROM tasks WHERE id IN ({marks})",
+                    sorted(task_ids),
+                ).fetchall()
+                owner_by_task = {
+                    int(row["id"]): row["owner_user_id"] for row in owner_rows
+                }
+
+            lead_items = []
             intent_items = []
             for comment_id, task_id, video_id, comment in jobs:
-                if self._comment_enrichment_stop.is_set():
-                    return
-                self._ingest_comment_to_lead(
-                    conn, comment_id, lead_service,
-                    task_id=task_id, video_id=video_id,
-                )
+                context = {
+                    "task_id": task_id,
+                    "video_id": video_id,
+                }
+                owner_id = owner_by_task.get(int(task_id)) if task_id is not None else None
+                if owner_id is not None:
+                    context["data_owner_user_id"] = int(owner_id)
+                lead_items.append((int(comment_id), context))
                 intent_items.append((comment_id, comment))
-            if intent_items and not self._comment_enrichment_stop.is_set():
+
+            # 线索、证据、评分历史统一在一个批事务中处理；单条异常由
+            # LeadService 的 savepoint 隔离，不能让整批评论回滚或拖死队列。
+            lead_results = lead_service.ingest_comments(lead_items)
+            for result in lead_results:
+                if result.get("error"):
+                    self._emit_log(
+                        f"[leads] 评论 {result.get('comment_id')} 批量转线索失败："
+                        f"{result['error']}"
+                    )
+
+            # 同步 outbox 也在本批末尾一次提交，避免员工数据隔离场景又
+            # 退回到每条评论一次 commit。
+            owner_results = [
+                result for result in lead_results
+                if result.get("lead_id") is not None
+                and result.get("context", {}).get("data_owner_user_id") is not None
+            ]
+            if owner_results:
+                try:
+                    try:
+                        from .data_scope import SyncStore  # type: ignore
+                    except ImportError:  # pragma: no cover
+                        from data_scope import SyncStore  # type: ignore
+                    sync_store = SyncStore(conn)
+                    for result in owner_results:
+                        context = result["context"]
+                        lead_id = int(result["lead_id"])
+                        comment_id = int(result["comment_id"])
+                        lead_row = conn.execute(
+                            "SELECT * FROM leads WHERE id = ?", (lead_id,)
+                        ).fetchone()
+                        comment_row = conn.execute(
+                            "SELECT * FROM comments WHERE id = ?", (comment_id,)
+                        ).fetchone()
+                        if lead_row:
+                            sync_store.enqueue(
+                                int(context["data_owner_user_id"]), "lead", lead_id,
+                                dict(lead_row), commit=False,
+                            )
+                        if comment_row:
+                            sync_store.enqueue(
+                                int(context["data_owner_user_id"]), "comment", comment_id,
+                                dict(comment_row), commit=False,
+                            )
+                    conn.commit()
+                except Exception as exc:
+                    conn.rollback()
+                    self._emit_log(
+                        f"[sync] 评论批量同步队列写入失败：{type(exc).__name__}: {exc}"
+                    )
+            if intent_items:
+                task_ids = {item[1] for item in jobs if item[1] is not None}
+                task_id = next(iter(task_ids)) if len(task_ids) == 1 else None
                 self._intent_batch_processor.on_comments(
-                    intent_items, task_id=jobs[0][1]
+                    intent_items, task_id=task_id
                 )
         finally:
             try:
@@ -735,6 +869,17 @@ class Scheduler:
                 f"{item['from_status']} → idle（未发现活动采集线程或有效租约）"
             )
         return {"cleared": cleared}
+
+    def _maybe_reconcile_stale_states(self, *, interval: float = 15.0) -> None:
+        """按节流周期校正运行残留，避免每次 GUI 轮询都扫描进程状态。"""
+        now = time.monotonic()
+        with self._state_reconcile_lock:
+            if now - self._last_state_reconcile_at < max(1.0, float(interval)):
+                return
+            # 先占位再执行，避免 GUI 轮询和后台状态请求同时触发重复扫描。
+            self._last_state_reconcile_at = now
+        self._reconcile_stale_account_states()
+        self._reconcile_stale_task_states()
 
     def _reconcile_stale_task_states(self) -> dict:
         """将重启后无活动线程的采集中任务恢复为可继续的暂停态。"""
@@ -1328,13 +1473,6 @@ class Scheduler:
             only_with_comments = bool(task.get("only_with_comments"))
             comment_collector = getattr(self.collector, "collect_with_comments", None)
             progress_types = selected_types
-            lead_service = None
-            if only_with_comments and callable(comment_collector):
-                try:
-                    lead_service = self._build_lead_service(self.conn)
-                except Exception as exc:  # noqa: BLE001
-                    self._emit_log(f"[leads] 线索服务初始化失败，继续保留评论采集：{exc}")
-
             for query_row in query_rows:
                 query = str(query_row.get("query") or "").strip()
                 if not query:
@@ -1372,6 +1510,7 @@ class Scheduler:
                 if only_with_comments and callable(comment_collector):
                     def _on_prefetched_item(item):
                         self._raise_for_task_control(task_id)
+                        deferred_jobs = []
                         with self._conn_lock:
                             if self._task_query_count(task_id, query) >= query_target:
                                 return
@@ -1396,7 +1535,7 @@ class Scheduler:
                                     for key in ("digg", "digg_count"):
                                         if comment.get(key) not in (None, ""):
                                             c_extra[key] = comment.get(key)
-                                comment_id = db.insert_comment(
+                                comment_id, inserted = db.insert_comment(
                                     self.conn, video_id,
                                     comment.get("user_id") if "comment_user" in progress_types else None,
                                     comment.get("nickname") if "comment_user" in progress_types else None,
@@ -1405,15 +1544,17 @@ class Scheduler:
                                     intent_score=comment.get("intent_score", 0) if "intent" in progress_types else 0,
                                     intent_label=comment.get("intent_label") if "intent" in progress_types else None,
                                     reply_suggestion=comment.get("reply_suggestion") if "intent" in progress_types else None,
-                                    platform=task["platform"])
-                                self._handle_collected_comment(
-                                    self.conn, comment_id, lead_service,
-                                    task_id=task_id, video_id=video_id,
-                                    comment=comment)
+                                    platform=task["platform"], commit=False,
+                                    return_inserted=True)
+                                if inserted and comment_id is not None:
+                                    deferred_jobs.append(
+                                        (comment_id, task_id, video_id, dict(comment))
+                                    )
                             self.conn.execute(
                                 "UPDATE videos SET status = 'done', collected_at = ? WHERE id = ?",
                                 (db._now_iso(), video_id))
                             self.conn.commit()
+                        self._queue_comment_enrichment(deferred_jobs)
 
                     bundle = comment_collector(
                         query, target_count=remaining_target,
@@ -2116,16 +2257,11 @@ class Scheduler:
                     if not progress_types:
                         progress_types = DEFAULT_COLLECT_TYPES
 
-                    lead_service = None
-                    try:
-                        lead_service = self._build_lead_service(self.conn)
-                    except Exception as exc:  # noqa: BLE001
-                        self._emit_log(f"[leads] 线索服务初始化失败，继续保留评论采集：{exc}")
-
                     def _on_prefetched_item(item):
                         # 微博/B站阶段 A 也支持按任务暂停；继续时由原采集线程
                         # 从这里恢复，避免重新打开搜索页面。
                         self._raise_for_task_control(task_id)
+                        deferred_jobs = []
                         with self._conn_lock:
                             if self._task_done_count(task_id) >= target_count:
                                 return
@@ -2151,7 +2287,7 @@ class Scheduler:
                                     for key in ("digg", "digg_count"):
                                         if comment.get(key) not in (None, ""):
                                             c_extra[key] = comment.get(key)
-                                comment_id = db.insert_comment(
+                                comment_id, inserted = db.insert_comment(
                                     self.conn, video_id,
                                     comment.get("user_id") if "comment_user" in progress_types else None,
                                     comment.get("nickname") if "comment_user" in progress_types else None,
@@ -2160,14 +2296,17 @@ class Scheduler:
                                     intent_score=comment.get("intent_score", 0) if "intent" in progress_types else 0,
                                     intent_label=comment.get("intent_label") if "intent" in progress_types else None,
                                     reply_suggestion=comment.get("reply_suggestion") if "intent" in progress_types else None,
-                                    platform=task["platform"])
-                                self._ingest_comment_to_lead(
-                                    self.conn, comment_id, lead_service,
-                                    task_id=task_id, video_id=video_id)
+                                    platform=task["platform"], commit=False,
+                                    return_inserted=True)
+                                if inserted and comment_id is not None:
+                                    deferred_jobs.append(
+                                        (comment_id, task_id, video_id, dict(comment))
+                                    )
                             self.conn.execute(
                                 "UPDATE videos SET status = 'done', collected_at = ? WHERE id = ?",
                                 (db._now_iso(), video_id))
                             self.conn.commit()
+                        self._queue_comment_enrichment(deferred_jobs)
 
                     bundle = comment_collector(
                         task["keyword"],
@@ -2587,6 +2726,26 @@ class Scheduler:
                         evt.set()
                         return
                     if left == 0:
+                        if is_monitoring:
+                            # 监控任务每一轮都必须闭合自己的运行记录，即使历史
+                            # 作品数已经达到目标。否则下一次到期 start() 会复用
+                            # 上一轮仍为 running 的 run_id，导致监控看似触发但
+                            # 没有新的运行记录，也无法准确统计每轮结果。
+                            with self._ctl_lock:
+                                db.update_task_status(self.ctl, task_id, "incomplete")
+                            with self._lock:
+                                self._task_status[task_id] = "incomplete"
+                            self._update_collection_run(
+                                task_id,
+                                status="no_more" if search_exhausted else "completed",
+                                stop_reason=(
+                                    "已明确没有更多内容" if search_exhausted
+                                    else "本轮无待处理内容"
+                                ),
+                                new_count=done_count,
+                            )
+                            evt.set()
+                            return
                         pause_evt = self._pause_evts.get(task_id)
                         stop_evt = self._task_stop_evts.get(task_id)
                         can_refill = (
@@ -2732,6 +2891,8 @@ class Scheduler:
                     batch_started_at = time.monotonic()
 
                 try:
+                    # 所有评论都先完整落库，再统一交给后台扩展队列；
+                    # 小评论量也不能回到逐条线索/意向处理路径。
                     defer_comment_enrichment = False
                     # 真实对接位（本阶段不启用）：window = self.bb.open_browser(...)
                     import json
@@ -2761,7 +2922,8 @@ class Scheduler:
                             f"评论采集完成：{len(comments)} 条"
                         )
                     platform = task.get("platform", "douyin")
-                    defer_comment_enrichment = len(comments) >= _LARGE_COMMENT_BATCH_SIZE
+                    # 无论评论数量多少，都在本批入库完成后统一排队处理。
+                    defer_comment_enrichment = bool(comments)
                     deferred_jobs = []
                     for c in comments:
                         extra = c.get("extra") or {}
@@ -2784,27 +2946,20 @@ class Scheduler:
                         intent_score = c.get("intent_score", 0) if "intent" in collect_types else 0
                         intent_label = c.get("intent_label") if "intent" in collect_types else None
                         reply_suggestion = c.get("reply_suggestion") if "intent" in collect_types else None
-                        inserted_result = db.insert_comment(
+                        comment_id, inserted = db.insert_comment(
                             conn, vid["id"], user_id, nickname,
                             c.get("content") if "comments" in collect_types else None,
                             c.get("comment_time"), extra=extra,
                             intent_score=intent_score,
                             intent_label=intent_label,
                             reply_suggestion=reply_suggestion,
-                            platform=platform,
-                            commit=not defer_comment_enrichment,
-                            return_inserted=defer_comment_enrichment,
+                            platform=platform, commit=False,
+                            return_inserted=True,
                         )
-                        if defer_comment_enrichment:
-                            comment_id, inserted = inserted_result
-                            if inserted:
-                                deferred_jobs.append(
-                                    (comment_id, task_id, vid["id"], dict(c))
-                                )
-                        else:
-                            self._handle_collected_comment(
-                                conn, inserted_result, lead_service,
-                                task_id=task_id, video_id=vid["id"], comment=c)
+                        if inserted and comment_id is not None:
+                            deferred_jobs.append(
+                                (comment_id, task_id, vid["id"], dict(c))
+                            )
                     if defer_comment_enrichment:
                         # 评论先整体提交，再交给后台扩展线程；否则后台连接可能
                         # 在采集连接尚未提交时读不到刚刚落库的评论。
@@ -3421,20 +3576,20 @@ class Scheduler:
             return False
         return evt.wait(timeout)
 
+    def _wait_for_comment_enrichment(self, timeout: float = 10.0) -> bool:
+        """等待评论扩展队列完成，使用可超时轮询避免 Queue.join() 无法取消。"""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            if self._comment_enrichment_queue.unfinished_tasks == 0:
+                return True
+            time.sleep(0.05)
+        return self._comment_enrichment_queue.unfinished_tasks == 0
+
     def shutdown(self, close_connections: bool = False):
         """停止所有 worker（应用退出/全局停止）。唤醒全部等待并等待退出；可再次 start。"""
         self.stop_monitoring()
         self._stop.set()
         self._runtime_heartbeat_stop.set()
-        try:
-            self._intent_batch_processor.close()
-        except Exception:
-            pass
-        if close_connections:
-            self._comment_enrichment_stop.set()
-            enrichment_thread = self._comment_enrichment_thread
-            if enrichment_thread is not None and enrichment_thread is not threading.current_thread():
-                enrichment_thread.join(timeout=1.5)
         with self._lock:
             self._global_paused = False
             for evt in list(self._pause_evts.values()):
@@ -3459,6 +3614,24 @@ class Scheduler:
         heartbeat = self._runtime_heartbeat_thread
         if heartbeat is not None and heartbeat is not current_thread:
             heartbeat.join(timeout=2)
+        if close_connections:
+            # 所有采集生产者已收到停止信号并完成等待后，再排空评论扩展。
+            # 扩展使用独立数据库连接，不能让主连接提前关闭导致句柄异常。
+            drained = self._wait_for_comment_enrichment(timeout=10.0)
+            if not drained:
+                self._emit_log(
+                    "[scheduler] 关闭前评论扩展队列未完全排空，将保留已落库评论供下次补处理"
+                )
+            try:
+                self._intent_batch_processor.close(timeout=10.0)
+            except Exception as exc:
+                self._emit_log(
+                    f"[scheduler] 关闭意向分析线程失败：{type(exc).__name__}: {exc}"
+                )
+            self._comment_enrichment_stop.set()
+            enrichment_thread = self._comment_enrichment_thread
+            if enrichment_thread is not None and enrichment_thread is not current_thread:
+                enrichment_thread.join(timeout=10.0)
         with self._lock:
             phase_accounts = list(self._phase_account_by_task)
             phase_snapshot = {tid: self._phase_threads.get(tid) for tid in phase_accounts}
@@ -3493,18 +3666,141 @@ class Scheduler:
                     self.ctl.close()
                 except Exception:
                     pass
+            self._stop_log_writer(timeout=3.0)
 
     # ------------------------------------------------------------------ 报表
-    def status_report(self) -> dict:
-        """汇总报表（json.dumps 可直接序列化），供 GUI 渲染。"""
-        # UI 轮询是最频繁、最可靠的状态刷新入口。先清理旧进程/已结束
-        # 线程留下的 working/cooldown，再生成快照，避免界面长期显示假占用。
-        self._reconcile_stale_account_states()
+    def _status_report_aggregates(self) -> dict:
+        """一次读取报表统计，避免在任务循环里反复执行同类 SQL。"""
+        result = {
+            "video_counts": {},
+            "comment_counts": {},
+            "valid_video_counts": {},
+            "valid_comment_counts": {},
+            "lead_counts": {},
+            "keyword_queries": {},
+            "latest_runs": {},
+            "monitoring_rules": {},
+        }
+        rows = self.conn.execute(
+            "SELECT task_id, status, COUNT(*) AS c FROM videos "
+            "GROUP BY task_id, status"
+        ).fetchall()
+        for row in rows:
+            result["video_counts"].setdefault(int(row["task_id"]), {})[
+                row["status"]
+            ] = int(row["c"] or 0)
+
+        rows = self.conn.execute(
+            "SELECT v.task_id, COUNT(c.id) AS comments, "
+            "SUM(CASE WHEN v.status = 'done' "
+            "AND TRIM(COALESCE(v.title, '')) <> '' "
+            "AND TRIM(COALESCE(v.url, '')) <> '' "
+            "AND TRIM(COALESCE(c.content, '')) <> '' THEN 1 ELSE 0 END) "
+            "AS valid_comments "
+            "FROM videos v LEFT JOIN comments c ON c.video_id = v.id "
+            "GROUP BY v.task_id"
+        ).fetchall()
+        for row in rows:
+            task_id = int(row["task_id"])
+            result["comment_counts"][task_id] = int(row["comments"] or 0)
+            result["valid_comment_counts"][task_id] = int(row["valid_comments"] or 0)
+
+        rows = self.conn.execute(
+            "SELECT task_id, COUNT(*) AS c FROM videos "
+            "WHERE status = 'done' AND TRIM(COALESCE(title, '')) <> '' "
+            "AND TRIM(COALESCE(url, '')) <> '' AND TRIM(COALESCE(vid, '')) <> '' "
+            "GROUP BY task_id"
+        ).fetchall()
+        result["valid_video_counts"] = {
+            int(row["task_id"]): int(row["c"] or 0) for row in rows
+        }
+
+        # 线索表属于可选迁移；旧库没有这些表时保留基础报表。
+        try:
+            rows = self.conn.execute(
+                "SELECT COALESCE(e.task_id, v.task_id) AS task_id, "
+                "COUNT(DISTINCT l.id) AS c FROM leads l "
+                "JOIN lead_evidence e ON e.lead_id = l.id "
+                "LEFT JOIN videos v ON v.id = COALESCE(e.video_id, "
+                "(SELECT c2.video_id FROM comments c2 WHERE c2.id = e.comment_id)) "
+                "WHERE COALESCE(e.task_id, v.task_id) IS NOT NULL "
+                "GROUP BY COALESCE(e.task_id, v.task_id)"
+            ).fetchall()
+            result["lead_counts"] = {
+                int(row["task_id"]): int(row["c"] or 0) for row in rows
+            }
+        except sqlite3.Error:
+            pass
+
+        try:
+            rows = self.conn.execute(
+                "SELECT task_id, query_order, query, target_count, status, "
+                "discovered_count, new_count, duplicate_count "
+                "FROM task_search_queries ORDER BY task_id, query_order"
+            ).fetchall()
+            for row in rows:
+                result["keyword_queries"].setdefault(int(row["task_id"]), []).append(dict(row))
+        except sqlite3.Error:
+            pass
+        try:
+            rows = self.conn.execute(
+                "SELECT run_id, task_id, status, started_at, finished_at, stop_reason, "
+                "discovered_count, new_count, duplicate_count, failed_count "
+                "FROM collection_runs ORDER BY task_id, started_at DESC"
+            ).fetchall()
+            for row in rows:
+                result["latest_runs"].setdefault(int(row["task_id"]), dict(row))
+        except sqlite3.Error:
+            pass
+        try:
+            rows = self.conn.execute(
+                "SELECT task_id, enabled, interval_seconds, next_run_at, last_run_at, "
+                "no_more_observed FROM monitoring_rules"
+            ).fetchall()
+            result["monitoring_rules"] = {
+                int(row["task_id"]): dict(row) for row in rows
+            }
+        except sqlite3.Error:
+            pass
+        return result
+
+    def status_report(self, *, cached: bool = False) -> dict:
+        """返回状态快照；GUI 轮询可使用短时缓存，业务调用默认取新数据。
+
+        ``cached=True`` 只允许用于展示型轮询。缓存对象应按只读快照使用，
+        业务操作和测试保持默认 ``cached=False``，避免状态判断使用旧数据。
+        """
+        now = time.monotonic()
+        if cached:
+            with self._status_report_cache_lock:
+                if (self._status_report_cache is not None and
+                        now - self._status_report_cache_at < self._status_report_cache_ttl):
+                    return self._status_report_cache
+        with self._status_report_build_lock:
+            if cached:
+                now = time.monotonic()
+                with self._status_report_cache_lock:
+                    if (self._status_report_cache is not None and
+                            now - self._status_report_cache_at < self._status_report_cache_ttl):
+                        return self._status_report_cache
+            self._maybe_reconcile_stale_states()
+            report = self._build_status_report()
+            if cached:
+                with self._status_report_cache_lock:
+                    self._status_report_cache = report
+                    self._status_report_cache_at = time.monotonic()
+            return report
+
+    def _build_status_report(self) -> dict:
+        """在后台线程构造完整报表；调用方负责节流和串行化。"""
         # 与采集回调对共享 self.conn 的写入使用同一把连接锁，确保 GUI
         # 轮询读取到的是完整提交后的快照，而不是写入过程中的半个结果。
         with self._conn_lock, self._lock:
             all_accounts = [dict(item) for item in self._all_accounts()]
+            all_tasks = self._all_tasks()
+            aggregates = self._status_report_aggregates()
             account_display = {}
+            waiting_accounts = set()
             for item in all_accounts:
                 platform_key = str(item.get("platform") or "douyin").strip().lower()
                 raw_name = str(item.get("name") or "").strip()
@@ -3522,8 +3818,10 @@ class Scheduler:
                 if raw_name:
                     account_display[(platform_key, raw_name)] = display_name
                 account_display[(platform_key, str(item.get("id") or ""))] = display_name
+                if str(item.get("status") or "") == "waiting_human":
+                    waiting_accounts.add((platform_key, raw_name))
             tasks_out = {}
-            for t in self._all_tasks():
+            for t in all_tasks:
                 tid = int(t["id"])
                 raw_status = t.get("status")
                 phase_thread = self._phase_threads.get(tid)
@@ -3533,54 +3831,12 @@ class Scheduler:
                     for account_id, task_id in self._worker_task.items()
                     for th in [self._worker_threads.get(account_id)]
                 )
-                cur = self.conn.execute(
-                    "SELECT status, COUNT(*) c FROM videos WHERE task_id = ? GROUP BY status",
-                    (tid,),
-                )
-                vc = {r["status"]: int(r["c"]) for r in cur.fetchall()}
-                cur = self.conn.execute(
-                    "SELECT COUNT(*) c FROM comments WHERE video_id IN "
-                    "(SELECT id FROM videos WHERE task_id = ?)",
-                    (tid,),
-                )
-                row = cur.fetchone()
-                done = self._r(row)
+                vc = aggregates["video_counts"].get(tid, {})
+                comment_count = aggregates["comment_counts"].get(tid, 0)
                 raw_done_count = int(vc.get("done", 0) or 0)
-                valid_video_done = raw_done_count
-                valid_comments = int(done.get("c", 0) or 0)
-                lead_count = 0
-                try:
-                    valid_row = self.conn.execute(
-                        "SELECT COUNT(*) AS c FROM videos "
-                        "WHERE task_id = ? AND status = 'done' "
-                        "AND TRIM(COALESCE(title, '')) <> '' "
-                        "AND TRIM(COALESCE(url, '')) <> '' "
-                        "AND TRIM(COALESCE(vid, '')) <> ''",
-                        (tid,),
-                    ).fetchone()
-                    valid_video_done = int(valid_row["c"] if valid_row else 0)
-                    valid_comment_row = self.conn.execute(
-                        "SELECT COUNT(*) AS c FROM comments c "
-                        "JOIN videos v ON v.id = c.video_id "
-                        "WHERE v.task_id = ? AND v.status = 'done' "
-                        "AND TRIM(COALESCE(v.title, '')) <> '' "
-                        "AND TRIM(COALESCE(v.url, '')) <> '' "
-                        "AND TRIM(COALESCE(c.content, '')) <> ''",
-                        (tid,),
-                    ).fetchone()
-                    valid_comments = int(valid_comment_row["c"] if valid_comment_row else 0)
-                    lead_row = self.conn.execute(
-                        "SELECT COUNT(DISTINCT l.id) AS c FROM leads l "
-                        "JOIN lead_evidence e ON e.lead_id = l.id "
-                        "LEFT JOIN videos v ON v.id = COALESCE(e.video_id, "
-                        "(SELECT c2.video_id FROM comments c2 WHERE c2.id = e.comment_id)) "
-                        "WHERE COALESCE(e.task_id, v.task_id) = ?",
-                        (tid,),
-                    ).fetchone()
-                    lead_count = int(lead_row["c"] if lead_row else 0)
-                except sqlite3.Error:
-                    # 旧库尚未建线索表时，任务报表仍可正常显示基础采集数据。
-                    pass
+                valid_video_done = aggregates["valid_video_counts"].get(tid, raw_done_count)
+                valid_comments = aggregates["valid_comment_counts"].get(tid, comment_count)
+                lead_count = aggregates["lead_counts"].get(tid, 0)
                 task_status = raw_status
                 pause_evt = self._pause_evts.get(tid)
                 if task_status == "aborted":
@@ -3589,37 +3845,13 @@ class Scheduler:
                         self._global_paused or
                         (pause_evt is not None and not pause_evt.is_set())):
                     task_status = "paused"
-                run_summary = None
-                monitoring_rule = None
-                keyword_queries = []
+                run_summary = aggregates["latest_runs"].get(tid)
+                monitoring_rule = aggregates["monitoring_rules"].get(tid)
+                keyword_queries = aggregates["keyword_queries"].get(tid, [])
                 effective_target = int(t.get("target_count") or 100)
-                try:
-                    query_rows = self.conn.execute(
-                        "SELECT query_order, query, target_count, status, discovered_count, "
-                        "new_count, duplicate_count FROM task_search_queries "
-                        "WHERE task_id = ? ORDER BY query_order", (tid,)
-                    ).fetchall()
-                    keyword_queries = [dict(row) for row in query_rows]
-                    if keyword_queries:
-                        effective_target = sum(max(1, int(row.get("target_count") or 100))
-                                               for row in keyword_queries)
-                    run_row = self.conn.execute(
-                        "SELECT run_id, status, started_at, finished_at, stop_reason, "
-                        "discovered_count, new_count, duplicate_count, failed_count "
-                        "FROM collection_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1",
-                        (tid,),
-                    ).fetchone()
-                    if run_row:
-                        run_summary = dict(run_row)
-                    rule_row = self.conn.execute(
-                        "SELECT enabled, interval_seconds, next_run_at, last_run_at, no_more_observed "
-                        "FROM monitoring_rules WHERE task_id = ?", (tid,)
-                    ).fetchone()
-                    if rule_row:
-                        monitoring_rule = dict(rule_row)
-                except sqlite3.Error:
-                    # 旧库迁移失败时保留原状态报表，不让新增字段破坏 GUI。
-                    pass
+                if keyword_queries:
+                    effective_target = sum(max(1, int(row.get("target_count") or 100))
+                                           for row in keyword_queries)
                 bound_names = t.get("task_accounts") or "[]"
                 if isinstance(bound_names, str):
                     try:
@@ -3635,6 +3867,10 @@ class Scheduler:
                     if not value:
                         continue
                     account_names.append(account_display.get((task_platform, value), value))
+                human_waiting = any(
+                    platform == task_platform and (not bound_names or name in bound_names)
+                    for platform, name in waiting_accounts
+                )
                 start_at = str((run_summary or {}).get("started_at") or t.get("created_at") or "")
                 end_at = str((run_summary or {}).get("finished_at") or "")
                 error_reason = str(
@@ -3653,10 +3889,11 @@ class Scheduler:
                     "video_done": vc.get("done", 0),
                     "valid_video_done": valid_video_done,
                     "video_failed": vc.get("failed", 0),
-                    "comments": int(done.get("c", 0)),
+                    "comments": int(comment_count),
                     "valid_comments": valid_comments,
                     "lead_count": lead_count,
                     "account_names": account_names,
+                    "human_waiting": human_waiting,
                     "start_at": start_at,
                     "end_at": end_at,
                     "error_reason": error_reason,

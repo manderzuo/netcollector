@@ -104,7 +104,10 @@ class IntentBatchProcessor:
         self._lock = threading.RLock()
         self._pending: set[int] = set()
         self._inflight: set[int] = set()
+        self._batch_threads: set[threading.Thread] = set()
         self._closed = False
+        self._flush_timer = None
+        self._tail_flush_seconds = 5.0
         # 批量 LLM 请求按队列串行执行，避免采集线程一口气启动多个网络请求、
         # 数据库事务和进度日志流，导致整台 GUI 被拖住。后续仍可通过构造参数
         # 扩展并发数，但默认必须保持单批次运行。
@@ -115,49 +118,43 @@ class IntentBatchProcessor:
         self._filtered_since_log = 0
         self._last_filtered_log_at = 0.0
 
-    def close(self) -> None:
+    def close(self, timeout: float = 8.0) -> None:
+        """停止接收新评论，并把不足一整批的尾部评论也提交处理。"""
         with self._lock:
             self._closed = True
+            timer = self._flush_timer
+            self._flush_timer = None
+        if timer is not None:
+            timer.cancel()
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            # close 后仍允许这一轮强制提交尾批；普通新数据不会再进入队列。
+            self._schedule_ready_batches(force=True)
+            with self._lock:
+                pending = bool(self._pending or self._inflight)
+                threads = [
+                    thread for thread in self._batch_threads
+                    if isinstance(thread, threading.Thread) and thread.is_alive()
+                ]
+            if not pending or not threads or time.monotonic() >= deadline:
+                break
+            remaining = max(0.01, deadline - time.monotonic())
+            threads[0].join(timeout=min(0.2, remaining))
 
     def on_comment(self, comment_id: int | None, *, task_id: int | None = None,
                    comment: dict | None = None) -> None:
-        """评论成功入库后调用；不让远程请求阻塞采集线程。"""
+        """旧单条入口兼容保留，但实际逻辑统一走批量入口。"""
         if comment_id is None:
             return
-        if comment is not None and not is_llm_eligible_comment(comment):
-            # 无效评论按本地规则处理，但不为每一条评论刷屏；采集期间
-            # 只按时间节流汇总提示一次，LLM 批量操作仍按批次记录。
-            should_log = False
-            now = time.monotonic()
-            with self._lock:
-                self._filtered_since_log += 1
-                if now - self._last_filtered_log_at >= 30.0:
-                    should_log = True
-                    filtered_count = self._filtered_since_log
-                    self._filtered_since_log = 0
-                    self._last_filtered_log_at = now
-            if should_log:
-                self._log(
-                    f"[intent] 评论意向分析：已过滤 {filtered_count} 条非文本评论，"
-                    "统一使用本地规则，不逐条发送 LLM"
-                )
-            self._apply_local([int(comment_id)], source="filtered_non_text")
-            return
-        if not self._llm_configured():
-            self._apply_local([int(comment_id)], source="local")
-            return
-        with self._lock:
-            if self._closed:
-                return
-            self._pending.add(int(comment_id))
-        self._schedule_ready_batches(task_id=task_id)
+        self.on_comments([(comment_id, comment)], task_id=task_id)
 
     def on_comments(self, items: list[tuple[int, dict | None]], *,
                     task_id: int | None = None) -> None:
-        """批量接收已落库评论，避免大评论作品逐条初始化意图处理。
+        """批量接收已落库评论，避免采集结果逐条初始化意图处理。
 
-        ``on_comment`` 保留给普通采集路径；高评论量后台队列使用本方法，
-        只读取一次 LLM 配置，并把本地规则评论合并为一次数据库处理。
+        采集路径统一使用本方法；只读取一次 LLM 配置，并把本地规则评论
+        合并为一次数据库处理。``on_comment`` 仅作为旧调用方的兼容入口。
         """
         normalized = []
         for comment_id, comment in items or []:
@@ -201,6 +198,7 @@ class IntentBatchProcessor:
                 return
             self._pending.update(eligible_ids)
         self._schedule_ready_batches(task_id=task_id)
+        self._arm_tail_flush()
 
     def _llm_configured(self) -> bool:
         now = time.monotonic()
@@ -224,19 +222,39 @@ class IntentBatchProcessor:
             self._llm_config_cache_until = now + 1.0
         return configured
 
-    def _schedule_ready_batches(self, *, task_id: int | None = None) -> None:
+    def _arm_tail_flush(self) -> None:
+        """为不足 batch_size 的尾部评论安排一次延迟提交。"""
+        with self._lock:
+            if self._closed or not self._pending or self._flush_timer is not None:
+                return
+            timer = threading.Timer(self._tail_flush_seconds, self._flush_pending_tail)
+            timer.daemon = True
+            self._flush_timer = timer
+        timer.start()
+
+    def _flush_pending_tail(self) -> None:
+        with self._lock:
+            self._flush_timer = None
+            if self._closed:
+                return
+        self._schedule_ready_batches(force=True)
+        self._arm_tail_flush()
+
+    def _schedule_ready_batches(self, *, task_id: int | None = None,
+                                force: bool = False) -> None:
         while True:
             with self._lock:
-                if self._closed:
+                if self._closed and not force:
                     return
                 available = sorted(self._pending - self._inflight)
-                if len(available) < self.batch_size:
+                if not available or (len(available) < self.batch_size and not force):
                     return
                 # 没有空闲槽位时保留在 pending，当前批次完成后会再次调度。
                 if not self._batch_slots.acquire(blocking=False):
                     return
                 comment_ids = available[:self.batch_size]
                 self._inflight.update(comment_ids)
+            thread = None
             try:
                 thread = threading.Thread(
                     target=self._run_batch,
@@ -244,10 +262,14 @@ class IntentBatchProcessor:
                     name=f"intent-batch-{comment_ids[0]}",
                     daemon=True,
                 )
+                with self._lock:
+                    self._batch_threads.add(thread)
                 thread.start()
             except Exception as exc:  # noqa: BLE001
                 with self._lock:
                     self._inflight.difference_update(comment_ids)
+                    if thread is not None:
+                        self._batch_threads.discard(thread)
                 self._batch_slots.release()
                 self._log(f"[intent] 批量任务启动失败：{type(exc).__name__}: {exc}")
                 return
@@ -337,10 +359,12 @@ class IntentBatchProcessor:
             with self._lock:
                 self._inflight.difference_update(comment_ids)
                 self._pending.difference_update(comment_ids)
+                self._batch_threads.discard(threading.current_thread())
             if slot_acquired:
                 self._batch_slots.release()
             # 只有当前批次释放槽位后，才尝试启动下一批，避免并发堆积。
             self._schedule_ready_batches(task_id=task_id)
+            self._arm_tail_flush()
 
     @staticmethod
     def _load_rows(conn, comment_ids: list[int]) -> list[dict]:
@@ -414,6 +438,7 @@ class IntentBatchProcessor:
                       task_id: int | None = None) -> None:
         lead_service = LeadService(LeadRepository(conn))
         row_by_id = {int(row["id"]): row for row in rows}
+        lead_items = []
         for comment_id, result in mapped.items():
             row = row_by_id.get(int(comment_id))
             if row is None:
@@ -434,15 +459,18 @@ class IntentBatchProcessor:
                 "UPDATE comments SET intent_score = ?, intent_label = ?, extra = ? WHERE id = ?",
                 (result["score"], result["level"], json.dumps(extra, ensure_ascii=False), int(comment_id)),
             )
-            lead_service.ingest_comment(
+            lead_items.append((
                 int(comment_id),
-                context={
-                    "task_id": task_id or row.get("task_id"),
+                {
+                    "task_id": task_id if task_id is not None else row.get("task_id"),
                     "video_id": row.get("video_id"),
                     "intent_override": result,
                 },
-            )
-        conn.commit()
+            ))
+        if lead_items:
+            lead_service.ingest_comments(lead_items)
+        else:
+            conn.commit()
 
     def _log(self, message: str) -> None:
         if callable(self.log_callback):

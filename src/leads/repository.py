@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -81,6 +82,53 @@ class LeadRepository:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        self._batch_depth = 0
+
+    @property
+    def in_batch(self) -> bool:
+        """当前连接是否处于线索批处理事务中。"""
+        return self._batch_depth > 0
+
+    @contextmanager
+    def batch_transaction(self):
+        """把多个线索操作合并为一次提交，外层事务负责最终提交。"""
+        outer_depth = self._batch_depth
+        started_transaction = False
+        if outer_depth == 0 and not self._conn.in_transaction:
+            self._conn.execute("BEGIN")
+            started_transaction = True
+        self._batch_depth += 1
+        try:
+            yield self._conn
+        except Exception:
+            if outer_depth == 0 and (started_transaction or self._conn.in_transaction):
+                self._conn.rollback()
+            raise
+        else:
+            if outer_depth == 0:
+                self._conn.commit()
+        finally:
+            self._batch_depth = outer_depth
+
+    @contextmanager
+    def savepoint(self, name: str = "lead_item"):
+        """为批内单条操作提供失败隔离，不触发整批提交。"""
+        safe_name = "".join(
+            ch if ch.isalnum() or ch == "_" else "_" for ch in str(name)
+        ) or "lead_item"
+        self._conn.execute(f"SAVEPOINT {safe_name}")
+        try:
+            yield self._conn
+        except Exception:
+            self._conn.execute(f"ROLLBACK TO SAVEPOINT {safe_name}")
+            self._conn.execute(f"RELEASE SAVEPOINT {safe_name}")
+            raise
+        else:
+            self._conn.execute(f"RELEASE SAVEPOINT {safe_name}")
+
+    def _commit(self) -> None:
+        if not self.in_batch:
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # leads 增改查
@@ -121,7 +169,7 @@ class LeadRepository:
                     existing,
                 ),
             )
-            self._conn.commit()
+            self._commit()
             return existing, False
 
         cur = self._conn.execute(
@@ -168,7 +216,7 @@ class LeadRepository:
                 now,
             ),
         )
-        self._conn.commit()
+        self._commit()
         return cur.lastrowid, True
 
     @staticmethod
@@ -416,7 +464,7 @@ class LeadRepository:
         cols = ", ".join(f"{k} = ?" for k in clean)
         params = list(clean.values()) + [_now_iso(), lead_id]
         self._conn.execute(f"UPDATE leads SET {cols}, updated_at = ? WHERE id = ?", params)
-        self._conn.commit()
+        self._commit()
 
     def transition_status(self, lead_id: int, target: str) -> str:
         """按冻结状态机变更线索状态，返回变更前状态。"""
@@ -452,7 +500,7 @@ class LeadRepository:
                 _to_json(evidence.get("metadata", {})),
             ),
         )
-        self._conn.commit()
+        self._commit()
         return cur.lastrowid if cur.rowcount else None
 
     def evidence_for(self, lead_id: int) -> List[dict]:
@@ -489,7 +537,7 @@ class LeadRepository:
             "INSERT INTO owners (name, province, contact, enabled, created_at) VALUES (?,?,?,1,?)",
             (name, province, contact, _now_iso()),
         )
-        self._conn.commit()
+        self._commit()
         return cur.lastrowid
 
     def list_owners(self, enabled_only: bool = True) -> List[dict]:
@@ -517,7 +565,7 @@ class LeadRepository:
             fields.append("enabled = ?"); params.append(int(bool(enabled)))
         if fields:
             self._conn.execute(f"UPDATE owners SET {', '.join(fields)} WHERE id = ?", params + [owner_id])
-            self._conn.commit()
+            self._commit()
 
     def add_assignment(self, lead_id: int, action: str, from_owner_id=None,
                        to_owner_id=None, province=None, reason=None) -> int:
@@ -527,7 +575,7 @@ class LeadRepository:
                VALUES (?,?,?,?,?,?,?)""",
             (lead_id, from_owner_id, to_owner_id, province, action, reason, _now_iso()),
         )
-        self._conn.commit()
+        self._commit()
         return cur.lastrowid
 
     def assignments_for(self, lead_id: int) -> List[dict]:
@@ -551,7 +599,7 @@ class LeadRepository:
              _to_json(after_value) if isinstance(after_value, (dict, list)) else after_value,
              _now_iso()),
         )
-        self._conn.commit()
+        self._commit()
 
     def audit_log_for(self, lead_id: int) -> List[dict]:
         rows = self._conn.execute(

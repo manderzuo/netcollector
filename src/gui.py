@@ -220,6 +220,8 @@ class GuiApp:
         self._pending_report = None
         self._report_delivery_scheduled = False
         self._latest_report = {}
+        self._lead_overview_stats_cache = {}
+        self._lead_overview_stats_cache_at = 0.0
         # 刷新状态只允许一个长期存活的后台线程；轮询线程只发请求。
         self._refresh_worker = threading.Thread(
             target=self._refresh_worker_loop, name="gui-status-refresh", daemon=True
@@ -687,6 +689,7 @@ class GuiApp:
 
         self._last_task_card_signature = None
         self._task_card_refs = {}
+        self._task_card_live_signatures = {}
         self._last_account_signature = None
         self._last_overview_signature = None
         self._human_banner_key = ""
@@ -2128,9 +2131,15 @@ class GuiApp:
 
         轻量只读查询；异常时返回空 dict，不影响总览其余部分。
         """
+        now = time.monotonic()
+        if now - getattr(self, "_lead_overview_stats_cache_at", 0.0) < 5.0:
+            return dict(getattr(self, "_lead_overview_stats_cache", {}) or {})
         try:
             dash = DashboardQueryService(self._lead_conn())
-            return dash.summary()
+            result = dash.summary()
+            self._lead_overview_stats_cache = dict(result or {})
+            self._lead_overview_stats_cache_at = now
+            return dict(self._lead_overview_stats_cache)
         except Exception:
             return {}
 
@@ -4022,7 +4031,7 @@ class GuiApp:
             current_status = selected.get("status", "")
         except Exception:
             pass
-        human_waiting = self._task_has_waiting_human(task_id) or self._task_has_human_reason(selected)
+        human_waiting = bool(selected.get("human_waiting")) or self._task_has_human_reason(selected)
         running_states = {"phase_a_search", "phase_b_comments", "running"}
         paused_states = {"paused", "incomplete", "failed", "no_account", "waiting_account"}
         pending_states = {"pending"}
@@ -4546,7 +4555,7 @@ class GuiApp:
             return  # 防止轮询、按钮刷新同时读取数据库
         self._refresh_inflight = True
         try:
-            rep = self.sched.status_report()
+            rep = self.sched.status_report(cached=True)
         except Exception as e:
             self._log(f"状态刷新失败：{type(e).__name__}: {e}")
             rep = None
@@ -4633,6 +4642,7 @@ class GuiApp:
             for child in self.task_cards.winfo_children():
                 child.destroy()
             self._task_card_refs = {}
+            self._task_card_live_signatures = {}
             for row_index, (tid, t) in enumerate(tasks.items()):
                 self._render_task_card(int(tid), t, selected_task == int(tid),
                                        alternate=(row_index % 2 == 1))
@@ -4710,7 +4720,7 @@ class GuiApp:
         info = ctk.CTkFrame(top, fg_color="transparent")
         info.pack(side="left", fill="x", expand=True)
         status = task.get("status", "")
-        human_waiting = self._task_has_waiting_human(tid) or self._task_has_human_reason(task)
+        human_waiting = bool(task.get("human_waiting")) or self._task_has_human_reason(task)
         title_label = ctk.CTkLabel(
             info,
             text=f"{task.get('keyword', '')}", text_color=COLORS["text"], font=FONTS["card_title"],
@@ -5001,6 +5011,16 @@ class GuiApp:
             ref = getattr(self, "_task_card_refs", {}).get(int(tid))
             if not isinstance(ref, dict):
                 continue
+            human_waiting = bool(task.get("human_waiting")) or self._task_has_human_reason(task)
+            live_signature = (
+                task.get("status"), task.get("video_done"), task.get("videos_total"),
+                task.get("comments"), task.get("error_message"), task.get("error_reason"),
+                task.get("target_count"), task.get("effective_target_count"),
+                task.get("search_exhausted"), human_waiting,
+            )
+            if live_signature == self._task_card_live_signatures.get(int(tid)):
+                continue
+            self._task_card_live_signatures[int(tid)] = live_signature
             target = max(1, int(task.get("effective_target_count") or task.get("target_count", 100) or 100))
             done = int(task.get("video_done", 0) or 0)
             collected_total = max(done, int(task.get("videos_total", 0) or 0))
@@ -5014,7 +5034,6 @@ class GuiApp:
             ref["progress"].configure(text=f"{done} / {collected_total}")
             ref["bar"].set(min(1.0, done / target))
             status = task.get("status", "")
-            human_waiting = self._task_has_waiting_human(tid) or self._task_has_human_reason(task)
             no_more_videos = self._task_needs_more_after_exhausted(task)
             status_text = self._task_display_status(task)
             fg, bg = status_palette(status)

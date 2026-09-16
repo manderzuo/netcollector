@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from db import create_task, init_db, insert_comment, insert_video
 from intent_batch import IntentBatchProcessor, _ProgressReporter
+from leads.repository import LeadRepository
+from leads.service import LeadService
 from llm_api import is_llm_eligible_comment
 
 
@@ -74,6 +76,37 @@ class IntentBatchTests(unittest.TestCase):
             processor.on_comment(123, comment={"content": "[图片]"})
         apply_local.assert_called_once_with([123], source="filtered_non_text")
         self.assertEqual(processor._pending, set())
+
+    def test_on_comments_local_path_processes_one_bulk_list(self):
+        processor = IntentBatchProcessor(self.db_path)
+        with patch.object(processor, "_llm_configured", return_value=False), \
+             patch.object(processor, "_apply_local") as apply_local:
+            processor.on_comments([
+                (101, {"content": "多少钱？"}),
+                (102, {"content": "怎么购买？"}),
+            ], task_id=self.task_id)
+
+        apply_local.assert_called_once_with([101, 102], source="local")
+        self.assertEqual(processor._pending, set())
+
+    def test_lead_service_batches_commits_and_isolates_bad_comment(self):
+        good_id = insert_comment(
+            self.conn, self.video_id, "batch-user", "批量用户", "怎么购买？"
+        )
+        commits = []
+        self.conn.set_trace_callback(
+            lambda statement: commits.append(statement.strip().upper())
+            if statement.strip().upper() == "COMMIT" else None
+        )
+        service = LeadService(LeadRepository(self.conn))
+        results = service.ingest_comments([
+            (999999, {"task_id": self.task_id, "video_id": self.video_id}),
+            (good_id, {"task_id": self.task_id, "video_id": self.video_id}),
+        ])
+
+        self.assertEqual(len(commits), 1)
+        self.assertIn("error", results[0])
+        self.assertIsNotNone(results[1].get("lead_id"))
 
     def test_batch_filters_invalid_comments_before_mapping(self):
         ids = [
@@ -140,6 +173,29 @@ class IntentBatchTests(unittest.TestCase):
         self.assertEqual(len(processor._inflight), 2)
         self.assertEqual(len(processor._pending - processor._inflight), 2)
         processor.close()
+
+    def test_close_flushes_partial_llm_batch(self):
+        comment_id = insert_comment(
+            self.conn, self.video_id, "tail-user", "尾批用户", "怎么购买？"
+        )
+        api_result = {
+            "healthy": True,
+            "items": [{"编号": 1, "意向": "高"}],
+            "returned_count": 1,
+        }
+        processor = IntentBatchProcessor(self.db_path, batch_size=500)
+        with patch.object(processor, "_llm_configured", return_value=True), \
+             patch("intent_batch.LLMApiClient.analyze_comments_batch", return_value=api_result):
+            processor.on_comments([
+                (comment_id, {"content": "怎么购买？"}),
+            ], task_id=self.task_id)
+            processor.close(timeout=3.0)
+
+        row = self.conn.execute(
+            "SELECT intent_label, intent_score FROM comments WHERE id = ?",
+            (comment_id,),
+        ).fetchone()
+        self.assertEqual((row["intent_label"], row["intent_score"]), ("high", 5))
 
 
 if __name__ == "__main__":

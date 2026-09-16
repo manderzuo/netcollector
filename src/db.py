@@ -217,7 +217,47 @@ def init_db(db_path: str = None, check_same_thread: bool = True) -> sqlite3.Conn
     except sqlite3.Error:
         conn.rollback()
     _normalize_existing_xhs_comments(conn)
+    _ensure_hot_path_indexes(conn)
     return conn
+
+
+def _ensure_hot_path_indexes(conn: sqlite3.Connection) -> None:
+    """补齐状态轮询和评论落库常用索引，兼容精简旧库。"""
+    definitions = (
+        ("idx_tasks_status_updated", "tasks", ("status", "updated_at")),
+        ("idx_videos_task_status", "videos", ("task_id", "status")),
+        ("idx_videos_task_account_status", "videos", ("task_id", "assigned_account", "status")),
+        ("idx_comments_video", "comments", ("video_id",)),
+        ("idx_collection_runs_task_started", "collection_runs", ("task_id", "started_at")),
+        ("idx_monitoring_rules_next_run", "monitoring_rules", ("enabled", "next_run_at")),
+        ("idx_lead_evidence_task_video_comment", "lead_evidence", ("task_id", "video_id", "comment_id")),
+    )
+    try:
+        tables = {
+            str(row[0]) for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for name, table, columns in definitions:
+            if table not in tables:
+                continue
+            existing = {
+                str(row[1]) for row in conn.execute(
+                    f"PRAGMA table_info('{table}')"
+                ).fetchall()
+            }
+            if all(column in existing for column in columns):
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {name} "
+                    f"ON {table}({', '.join(columns)})"
+                )
+        conn.commit()
+    except sqlite3.Error:
+        # 索引属于性能增强，不能阻塞旧库启动和基础采集。
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
 
 
 def _run_lead_migrations(conn):

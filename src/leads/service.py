@@ -211,7 +211,9 @@ class LeadService:
                 self._repo.transition_status(lead_id, LeadStatus.QUALIFIED)
         if self._lead_scorer is not None:
             try:
-                self._score_store.record(lead_id, intent_result)
+                self._score_store.record(
+                    lead_id, intent_result, commit=not self._repo.in_batch
+                )
             except sqlite3.Error:
                 log.warning("线索评分历史写入失败", exc_info=True)
 
@@ -238,6 +240,50 @@ class LeadService:
         """公开契约（技术方案 7.1）：幂等生成/更新线索，返回 lead_id。"""
         lead_id, _created = self.ingest_comment_and_report(comment_id, context)
         return lead_id
+
+    def ingest_comments(
+        self,
+        items: List[tuple[int, Optional[dict]]],
+        *,
+        continue_on_error: bool = True,
+    ) -> List[dict]:
+        """在一个事务中批量生成/更新线索，并隔离单条坏数据。
+
+        ``items`` 为 ``(comment_id, context)`` 列表。返回值按处理结果记录
+        ``comment_id/lead_id/created``，失败项带 ``error``；批量调用不会因为
+        单条异常回滚已经成功处理的评论。
+        """
+        normalized = []
+        for comment_id, context in items or []:
+            if comment_id is None:
+                continue
+            normalized.append((int(comment_id), dict(context or {})))
+        if not normalized:
+            return []
+
+        results = []
+        with self._repo.batch_transaction():
+            for index, (comment_id, context) in enumerate(normalized):
+                try:
+                    with self._repo.savepoint(f"lead_item_{index}"):
+                        lead_id, created = self.ingest_comment_and_report(
+                            comment_id, context=context
+                        )
+                except Exception as exc:  # noqa: BLE001 失败隔离
+                    if not continue_on_error:
+                        raise
+                    results.append({
+                        "comment_id": comment_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                else:
+                    results.append({
+                        "comment_id": comment_id,
+                        "lead_id": lead_id,
+                        "created": bool(created),
+                        "context": context,
+                    })
+        return results
 
     # ------------------------------------------------------------------
     # 重新分类（保留人工修正）
@@ -313,7 +359,10 @@ class LeadService:
         })
         if self._lead_scorer is not None:
             try:
-                self._score_store.record(lead_id, intent_result, source="reclassify")
+                self._score_store.record(
+                    lead_id, intent_result, source="reclassify",
+                    commit=not self._repo.in_batch,
+                )
             except sqlite3.Error:
                 log.warning("线索评分历史写入失败", exc_info=True)
         if lead.get("status") == LeadStatus.NEW and pool == Pool.HENAN:

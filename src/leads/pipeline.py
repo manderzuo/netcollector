@@ -52,17 +52,30 @@ def batch_ingest_comments(
     stats = IngestStats()
     stats.total = len(comment_ids)
 
+    batch_size = max(1, int(batch_size))
     for i in range(0, len(comment_ids), batch_size):
         batch = comment_ids[i:i + batch_size]
+        items = []
         for cid in batch:
             try:
                 ctx = context_factory(cid) if context_factory else None
-                _lead_id, created = service.ingest_comment_and_report(cid, context=ctx)
-                if created:
-                    stats.created += 1
-                else:
-                    stats.updated += 1
+                items.append((cid, ctx))
             except Exception as exc:  # noqa: BLE001 失败隔离
-                log.warning("评论 %s 转线索失败: %s", cid, exc)
+                log.warning("评论 %s 上下文构造失败: %s", cid, exc)
                 stats.failed.append({"ref": cid, "reason": str(exc)})
+
+        for result in service.ingest_comments(items):
+            if result.get("error"):
+                log.warning(
+                    "评论 %s 转线索失败: %s",
+                    result.get("comment_id"), result["error"],
+                )
+                stats.failed.append({
+                    "ref": result.get("comment_id"),
+                    "reason": result["error"],
+                })
+            elif result.get("created"):
+                stats.created += 1
+            else:
+                stats.updated += 1
     return stats

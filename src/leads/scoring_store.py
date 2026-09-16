@@ -40,7 +40,7 @@ class LeadScoreStore:
         self.conn.commit()
         return rule_id
 
-    def record(self, lead_id: int, result, *, source="rule") -> int:
+    def record(self, lead_id: int, result, *, source="rule", commit: bool = True) -> int:
         cur = self.conn.execute(
             "INSERT INTO lead_score_history(lead_id,score,level,reasons,rule_version,source,created_at) "
             "VALUES (?,?,?,?,?,?,?)",
@@ -48,7 +48,8 @@ class LeadScoreStore:
              json.dumps(result.reasons, ensure_ascii=False), result.rule_version,
              source, self.clock()),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return int(cur.lastrowid)
 
     def history(self, lead_id: int, limit: int = 50) -> list[dict]:
@@ -65,4 +66,3 @@ class LeadScoreStore:
                 item["reasons"] = []
             out.append(item)
         return out
-
