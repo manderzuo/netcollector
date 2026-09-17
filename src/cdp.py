@@ -35,6 +35,10 @@ class CdpError(Exception):
     pass
 
 
+class CdpCancelledError(TimeoutError):
+    """A CDP command was interrupted by the owning task's stop signal."""
+
+
 class CdpSession:
     def __init__(self, browser_ws_url: str, timeout: float = 30.0):
         self.url = browser_ws_url
@@ -44,8 +48,47 @@ class CdpSession:
         self._id = 0
         self._pending = {}
         self._listeners = {}
+        # A threading.Event is intentionally used here: scheduler control
+        # signals originate outside the asyncio loop that owns this session.
+        self._cancel_event = None
         self._trace = DebugTrace("cdp")
         self._trace.emit("session_created", websocket_url=self.url, timeout=self.timeout)
+
+    def set_cancel_event(self, cancel_event):
+        """Attach the task stop event used to interrupt in-flight commands."""
+        previous = self._cancel_event
+        self._cancel_event = cancel_event
+        return previous
+
+    async def _await_with_control(self, awaitable, timeout: float,
+                                  cancel_event=None):
+        """Wait for an awaitable while honoring stop and timeout signals.
+
+        ``asyncio.wait_for`` alone cannot observe a ``threading.Event``.  A
+        short polling interval keeps stop latency bounded without creating a
+        helper thread per CDP command. ``shield`` prevents the polling timeout
+        from cancelling the actual CDP response future.
+        """
+        cancel_event = cancel_event if cancel_event is not None else self._cancel_event
+        task = asyncio.ensure_future(awaitable)
+        deadline = asyncio.get_running_loop().time() + float(timeout)
+        try:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CdpCancelledError("CDP 命令因任务停止而取消")
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(task), min(0.1, remaining)
+                    )
+                except asyncio.TimeoutError:
+                    continue
+        except BaseException:
+            if not task.done():
+                task.cancel()
+            raise
 
     async def connect(self):
         self.ws = await websockets.connect(self.url, max_size=64 * 1024 * 1024)
@@ -115,9 +158,14 @@ class CdpSession:
             timeout=timeout or self.timeout,
             params=logged_params,
         )
+        command_timeout = float(timeout or self.timeout)
         try:
-            await self.ws.send(json.dumps(msg))
-            result = await asyncio.wait_for(fut, timeout or self.timeout)
+            await self._await_with_control(
+                self.ws.send(json.dumps(msg)), command_timeout
+            )
+            result = await self._await_with_control(
+                fut, command_timeout
+            )
             self._trace.emit(
                 "command_completed",
                 command_id=command_id,
@@ -149,6 +197,15 @@ class CdpSession:
                     session_id=session_id,
                     duration_ms=duration_ms,
                     reason="response_body_expired",
+                )
+            elif isinstance(exc, CdpCancelledError):
+                self._trace.emit(
+                    "command_cancelled",
+                    command_id=command_id,
+                    method=method,
+                    session_id=session_id,
+                    duration_ms=duration_ms,
+                    reason="task_stop_requested",
                 )
             else:
                 self._trace.exception(

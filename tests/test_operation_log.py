@@ -52,7 +52,9 @@ class OperationLogTests(unittest.TestCase):
             )
             self.assertEqual(record["event"], "native_click")
             self.assertEqual(record["details"]["x"], 120)
-            self.assertIn("native_click", OperationLog.format_record(record))
+            formatted = OperationLog.format_record(record)
+            self.assertIn("native_click", formatted)
+            self.assertIn("耗时=12.34ms", formatted)
 
             snapshot = store.save_hourly_snapshot(folder)
             self.assertTrue(os.path.exists(snapshot["jsonl"]))

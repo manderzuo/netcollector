@@ -130,6 +130,12 @@ class OperationLog:
             prefix += f" [{source}/{event}]"
         text = f"{prefix} {record.get('message', '')}"
         details = record.get("details")
+        duration_ms = record.get("duration_ms")
+        if duration_ms is not None:
+            try:
+                text += f" | 耗时={float(duration_ms):.2f}ms"
+            except (TypeError, ValueError):
+                text += f" | 耗时={duration_ms}"
         if details:
             text += " | 详情=" + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
         return text

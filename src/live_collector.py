@@ -115,6 +115,7 @@ class _PlatformCtx:
         self.session = None
         self.sid = None
         self.connect_error = None
+        self.cancel_event = None
         # 小红书节奏下限：不依赖任务里的 batch_size/cooldown_seconds，
         # 保证任务参数再激进时也不会快于人工浏览节奏。
         # _PlatformCtx.lock 保证同一窗口串行，计数不会被并发 worker 重复计算。
@@ -423,7 +424,7 @@ class _PlatformCtx:
         return self._wrap_human(lambda: self._run_sync(
             self._search, keyword, mode, target_count, pause_event, cancel_event,
             search_sort,
-            timeout=None))
+            timeout=None, cancel_event=cancel_event))
 
     def fetch_comments(self, vid, url="", xsec_token="", platform=None,
                        pause_event=None, cancel_event=None):
@@ -439,40 +440,49 @@ class _PlatformCtx:
         }.get(self.platform, 480)
         return self._wrap_human(lambda: self._run_sync(
             self._fetch, vid, url, xsec_token, pause_event, cancel_event,
-            timeout=timeout))
+            timeout=timeout, cancel_event=cancel_event))
 
-    def _run_sync(self, coro_fn, *args, timeout=180):
+    def _run_sync(self, coro_fn, *args, timeout=180, cancel_event=None):
         with self.lock:
-            fut = asyncio.run_coroutine_threadsafe(coro_fn(*args), self.loop)
-            operation = getattr(coro_fn, "__name__", "采集操作")
-            # timeout=None 表示搜索阶段一直等待采集器返回终止元数据；
-            # 单次 CDP 命令仍由 cdp.py 自身的命令级超时保护。
-            if timeout is None:
+            previous_cancel_event = None
+            if self.session is not None:
+                previous_cancel_event = self.session.set_cancel_event(
+                    cancel_event if cancel_event is not None else self.cancel_event
+                )
+            try:
+                fut = asyncio.run_coroutine_threadsafe(coro_fn(*args), self.loop)
+                operation = getattr(coro_fn, "__name__", "采集操作")
+                # timeout=None 表示搜索阶段一直等待采集器返回终止元数据；
+                # 单次 CDP 命令仍由 cdp.py 自身的命令级超时保护。
+                if timeout is None:
+                    try:
+                        return fut.result()
+                    except CollectorTimeoutError:
+                        raise
+                    except (TimeoutError, asyncio.TimeoutError) as exc:
+                        raise CollectorTimeoutError(
+                            operation, cause=exc
+                        ) from exc
                 try:
-                    return fut.result()
+                    return fut.result(timeout=timeout)
                 except CollectorTimeoutError:
                     raise
                 except (TimeoutError, asyncio.TimeoutError) as exc:
+                    # concurrent.futures.Future 超时后，底层协程默认仍会在事件
+                    # 循环里继续执行。若不取消，它会继续占用同一个平台上下文，
+                    # 后续 URL 虽然已被 scheduler 取出，却无法真正打开详情页，
+                    # 最终表现为一个 collecting 把整批任务拖住。
+                    fut.cancel()
+                    try:
+                        fut.result(timeout=2)
+                    except Exception:
+                        pass
                     raise CollectorTimeoutError(
-                        operation, cause=exc
+                        operation, timeout=timeout, cause=exc
                     ) from exc
-            try:
-                return fut.result(timeout=timeout)
-            except CollectorTimeoutError:
-                raise
-            except (TimeoutError, asyncio.TimeoutError) as exc:
-                # concurrent.futures.Future 超时后，底层协程默认仍会在事件
-                # 循环里继续执行。若不取消，它会继续占用同一个平台上下文，
-                # 后续 URL 虽然已被 scheduler 取出，却无法真正打开详情页，
-                # 最终表现为一个 collecting 把整批任务拖住。
-                fut.cancel()
-                try:
-                    fut.result(timeout=2)
-                except Exception:
-                    pass
-                raise CollectorTimeoutError(
-                    operation, timeout=timeout, cause=exc
-                ) from exc
+            finally:
+                if self.session is not None:
+                    self.session.set_cancel_event(previous_cancel_event)
 
 
 class LiveCollector(Collector):
@@ -528,6 +538,8 @@ class LiveCollector(Collector):
         ctx = _PlatformCtx(platform, ws_url=ws_url)
         ctx.pause_event = pause_event
         ctx.cancel_event = cancel_event
+        if ctx.session is not None:
+            ctx.session.set_cancel_event(cancel_event)
         ctx.navigate_home()
         return ctx
 
@@ -646,6 +658,10 @@ class LiveCollector(Collector):
         try:
             return ctx.fetch_comments(vid, url, pause_event=pause_event, cancel_event=cancel_event)
         except CollectorTimeoutError as exc:
+            if cancel_event is not None and cancel_event.is_set():
+                # 任务停止触发的CDP取消不能进入重连/重试，否则停止按钮会
+                # 重新打开浏览器连接，反而延长任务收尾时间。
+                raise
             # 超时通常意味着页面事件队列或 CDP 通道已经失去响应；继续复用
             # 原上下文只会把同一把锁和同一个 websocket 带入下一个作品。重建
             # 窗口连接后仅重试当前作品一次，避免一个异常作品无限循环。

@@ -709,6 +709,10 @@ class Scheduler:
             except Exception as exc:  # noqa: BLE001
                 if not self._is_sqlite_lock_error(exc) or attempt >= _COMMENT_ENRICHMENT_DB_RETRIES:
                     raise
+                self._emit_log(
+                    f"[leads] 评论线索批次遇到数据库锁，退避重试 "
+                    f"({attempt + 1}/{_COMMENT_ENRICHMENT_DB_RETRIES})：{exc}"
+                )
                 time.sleep(0.25 * (2 ** attempt))
                 continue
 
@@ -736,6 +740,10 @@ class Scheduler:
             if not locked_items:
                 break
             if attempt >= _COMMENT_ENRICHMENT_DB_RETRIES:
+                self._emit_log(
+                    f"[leads] 评论线索批次锁冲突重试耗尽，保留失败结果："
+                    f"{len(locked_items)} 条"
+                )
                 for comment_id, _context in locked_items:
                     cid = int(comment_id)
                     results_by_comment[cid] = result_by_id.get(cid) or {
