@@ -15,6 +15,10 @@ class DouyinExpandControlTests(unittest.TestCase):
         fetch_source = inspect.getsource(dy_collect.fetch_comments)
         self.assertIn("expand_stalled_rounds", fetch_source)
         self.assertIn("expand_click_total >= 24", fetch_source)
+        self.assertIn("declaredCount", source)
+        self.assertIn("reported_gap", fetch_source)
+        self.assertIn("pagination_response_seen", fetch_source)
+        self.assertIn("douyin_comment_scan_finished", fetch_source)
 
     def test_comment_pagination_waits_for_finished_bodies_and_explicit_end(self):
         fetch_source = inspect.getsource(dy_collect.fetch_comments)
@@ -22,6 +26,8 @@ class DouyinExpandControlTests(unittest.TestCase):
         self.assertIn("primary_no_more", fetch_source)
         self.assertIn("bottom_stable_rounds", fetch_source)
         self.assertIn("not pending", fetch_source)
+        self.assertIn("initial_response_count", fetch_source)
+        self.assertIn("pagination_ready", fetch_source)
         self.assertNotIn("window.scrollTo(0, document.body.scrollHeight)", fetch_source)
 
     def test_comment_payload_reads_nested_has_more(self):

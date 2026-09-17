@@ -969,6 +969,27 @@ class TestBackendService(unittest.TestCase):
         self.assertIn("log_stats", result)
         self.assertIn("normal", result["log_stats"])
 
+    def test_diagnostics_snapshot_does_not_wait_for_busy_lead_lock(self):
+        # 采集/互动长事务不能把诊断页拖到前端 10 秒超时；诊断允许本次
+        # 暂时返回平台占位行，下一次刷新再补齐数据库状态。
+        self.service._lead_lock.acquire()
+        try:
+            started = time.monotonic()
+            result = self.service._diagnostics_snapshot()
+            elapsed = time.monotonic() - started
+        finally:
+            self.service._lead_lock.release()
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(
+            [item["platform"] for item in result["accounts"]],
+            ["douyin", "xhs", "bilibili", "weibo", "kuaishou"],
+        )
+
+    def test_diagnostics_snapshot_reuses_short_cache(self):
+        first = self.service._diagnostics_snapshot()
+        second = self.service._diagnostics_snapshot()
+        self.assertIs(first, second)
+
     def test_leads_and_interactions_can_be_exported_by_task(self):
         task_id, lead_id = self._seed_lead()
         lead_export = self.client.request("export_leads_by_task", {

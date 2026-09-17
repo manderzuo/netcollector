@@ -492,11 +492,21 @@ class CoreTests(unittest.TestCase):
         )
         run_id = sched._ensure_collection_run(task_row)
         self.assertTrue(run_id)
+        original_started = sched.conn.execute(
+            "SELECT started_at FROM collection_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()["started_at"]
         sched._record_collection_event(
             task, "search", "search_finished", "已滚动到底部且连续无新增视频",
             {"discovered_count": 1, "new_count": 1, "duplicate_count": 0},
         )
         sched._update_collection_run(task, status="paused", stop_reason="需要人工验证：验证码")
+        resumed_run_id = sched._ensure_collection_run(task_row)
+        self.assertEqual(resumed_run_id, run_id)
+        resumed_run = sched.conn.execute(
+            "SELECT status, started_at FROM collection_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        self.assertEqual(resumed_run["status"], "running")
+        self.assertEqual(resumed_run["started_at"], original_started)
         sched.conn.execute(
             "UPDATE tasks SET search_phase_complete = 0, search_exhausted = 0 WHERE id = ?",
             (task,),

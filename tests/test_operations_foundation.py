@@ -119,6 +119,19 @@ class OperationsFoundationTests(unittest.TestCase):
         self.assertEqual(record["new_count"], 10)
         self.assertEqual(len(store.events(run_id)), 3)
 
+    def test_resuming_paused_collection_run_keeps_original_start_time(self):
+        store = CollectionRunStore(self.conn, clock=lambda: self.clock().isoformat(timespec="seconds"))
+        run_id = store.create(self.task_id, "douyin", self.account_id, run_id="run-pause-resume")
+        original = store.get(run_id)["started_at"]
+        store.update(run_id, status="paused", stop_reason="用户暂停")
+        self.clock.value += timedelta(minutes=5)
+        store.resume(run_id)
+        record = store.get(run_id)
+        self.assertEqual(record["status"], "running")
+        self.assertEqual(record["started_at"], original)
+        self.assertIsNone(record["stop_reason"])
+        self.assertIsNone(record["finished_at"])
+
     def test_delete_task_cleans_operational_dependencies(self):
         """右键删除任务不能被运行记录/监控外键拦截。"""
         video_id = insert_video(

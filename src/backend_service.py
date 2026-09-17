@@ -243,6 +243,12 @@ class BackendService:
         # 线索查询和互动草稿写入使用独立 SQLite 连接，但仍串行化这两类
         # 操作，避免多个 QML 请求同时触发迁移、提交或状态推进。
         self._lead_lock = threading.RLock()
+        # diagnostics_snapshot 只读且会被多个页面入口触发。缓存短时间内的
+        # 结果，避免刷新按钮/页面切换重复扫描日志并争抢线索数据库锁。
+        self._diagnostics_cache_lock = threading.Lock()
+        self._diagnostics_cache: dict[str, Any] | None = None
+        self._diagnostics_cache_at = 0.0
+        self._diagnostics_cache_ttl = 2.0
         # 真实回复会在这里等待浏览器加载和页面确认，不能把全局线索锁
         # 占满整个浏览器流程；同一草稿仍需单独串行，防止慢页面期间重复
         # 点击触发两次平台发送。
@@ -3243,6 +3249,11 @@ class BackendService:
 
     def _diagnostics_snapshot(self) -> dict[str, Any]:
         """读取诊断摘要，不自动触碰浏览器、不执行网络探测。"""
+        now = time.monotonic()
+        with self._diagnostics_cache_lock:
+            if (self._diagnostics_cache is not None and
+                    now - self._diagnostics_cache_at < self._diagnostics_cache_ttl):
+                return self._diagnostics_cache
         try:
             from .config_loader import AppConfig  # type: ignore
             from .llm_api import LLMApiClient  # type: ignore
@@ -3256,7 +3267,9 @@ class BackendService:
         tieba = config.tieba_api() or {}
         health_rows = []
         account_rows = []
-        with self._lead_lock:
+        default_platforms = ("douyin", "xhs", "bilibili", "weibo", "kuaishou")
+        locked = self._lead_lock.acquire(timeout=0.75)
+        if locked:
             conn = self._lead_connection()
             try:
                 try:
@@ -3290,7 +3303,7 @@ class BackendService:
                         bucket["bound_accounts"] += 1
                     if item.get("status") == "waiting_human":
                         bucket["waiting_human"] += 1
-                for platform in ("douyin", "xhs", "bilibili", "weibo", "kuaishou"):
+                for platform in default_platforms:
                     account_rows.append(grouped.get(platform, {
                         "platform": platform,
                         "platform_label": self._platform_label(platform),
@@ -3300,62 +3313,68 @@ class BackendService:
                     }))
             finally:
                 conn.close()
+                self._lead_lock.release()
+        else:
+            # 诊断页不能因为采集/互动正在写库而阻塞几十秒；本次返回固定的
+            # 平台占位行，下一次刷新会补齐账号和健康状态。
+            account_rows = [{
+                "platform": platform,
+                "platform_label": self._platform_label(platform),
+                "accounts": 0,
+                "bound_accounts": 0,
+                "waiting_human": 0,
+            } for platform in default_platforms]
 
         log_items = []
         log_stats = {
             "date": datetime.now().astimezone().date().isoformat(),
             "total": 0, "normal": 0, "warning": 0, "error": 0,
             "alerts": [], "next_alert": None,
+            "returned": 0, "truncated": False,
         }
         today = str(log_stats["date"])
-        log_path = os.path.join(
-            os.path.dirname(os.path.abspath(self.scheduler.db_path)),
-            "logs", "operation_events.jsonl",
-        )
+        recent_limit = 300
         try:
-            with open(log_path, encoding="utf-8") as stream:
-                # 设置页展示当天完整日志；实时追加仍由 OperationLog 的内存上限
-                # 保护，历史文件在这里按日期筛选，避免只看到最后 60 条。
-                for line in stream:
-                    try:
-                        item = json.loads(line)
-                    except (TypeError, ValueError):
-                        continue
-                    if isinstance(item, Mapping):
-                        # 详情已在写入时完成密钥脱敏；诊断页保留操作参数、结果和耗时，
-                        # 方便复现按钮点击及后台反馈，而不把 API Key 等敏感值带入界面。
-                        timestamp = str(item.get("timestamp") or "")
-                        if timestamp[:10] != today:
-                            continue
-                        level = str(item.get("level") or "info").lower()
-                        if level in {"error", "failed", "critical"}:
-                            normalized_level = "error"
-                        elif level in {"warning", "warn"}:
-                            normalized_level = "warning"
-                        else:
-                            normalized_level = "normal"
-                        record = {
-                            "timestamp": timestamp,
-                            "level": normalized_level,
-                            "source": str(item.get("source") or ""),
-                            "event": str(item.get("event") or ""),
-                            "message": str(item.get("message") or ""),
-                            "action": str(item.get("action") or ""),
-                            "outcome": str(item.get("outcome") or ""),
-                            "duration_ms": item.get("duration_ms"),
-                            "details": item.get("details") if isinstance(item.get("details"), Mapping) else {},
-                        }
-                        log_items.append(record)
-                        log_stats["total"] += 1
-                        log_stats[normalized_level] += 1
-                        if normalized_level in {"warning", "error"}:
-                            log_stats["alerts"].append(record)
-        except OSError:
+            # 诊断页只需要最近的操作上下文；逐次从文件头扫描当天全部日志会
+            # 随运行天数增长，且在采集高峰时与日志追加互相放大延迟。
+            recent_records = self._operation_log.recent(recent_limit)
+            for item in recent_records:
+                if not isinstance(item, Mapping):
+                    continue
+                timestamp = str(item.get("timestamp") or "")
+                if timestamp[:10] != today:
+                    continue
+                level = str(item.get("level") or "info").lower()
+                if level in {"error", "failed", "critical"}:
+                    normalized_level = "error"
+                elif level in {"warning", "warn"}:
+                    normalized_level = "warning"
+                else:
+                    normalized_level = "normal"
+                record = {
+                    "timestamp": timestamp,
+                    "level": normalized_level,
+                    "source": str(item.get("source") or ""),
+                    "event": str(item.get("event") or ""),
+                    "message": str(item.get("message") or ""),
+                    "action": str(item.get("action") or ""),
+                    "outcome": str(item.get("outcome") or ""),
+                    "duration_ms": item.get("duration_ms"),
+                    "details": item.get("details") if isinstance(item.get("details"), Mapping) else {},
+                }
+                log_items.append(record)
+                log_stats["total"] += 1
+                log_stats[normalized_level] += 1
+                if normalized_level in {"warning", "error"}:
+                    log_stats["alerts"].append(record)
+            log_stats["returned"] = len(log_items)
+            log_stats["truncated"] = len(recent_records) >= recent_limit
+        except (OSError, TypeError, ValueError):
             pass
 
         log_stats["next_alert"] = log_stats["alerts"][0] if log_stats["alerts"] else None
 
-        return {
+        result = {
             "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "bitbrowser": {
                 "configured": bool(str(bitbrowser.get("base_url") or "").strip()),
@@ -3380,6 +3399,10 @@ class BackendService:
             "logs": log_items,
             "log_stats": log_stats,
         }
+        with self._diagnostics_cache_lock:
+            self._diagnostics_cache = result
+            self._diagnostics_cache_at = time.monotonic()
+        return result
 
     def _run_platform_health(self) -> dict[str, Any]:
         try:

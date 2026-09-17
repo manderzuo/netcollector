@@ -413,12 +413,32 @@ class Scheduler:
                     ).fetchone()
                 if row and row["status"] == "running":
                     return current
+                if row and row["status"] == "paused":
+                    # 用户暂停后继续仍属于同一轮采集；复用运行记录，避免
+                    # status_report() 用新的 started_at 覆盖任务首次开始时间。
+                    from operations.collection_runs import CollectionRunStore
+                    with self._ctl_lock:
+                        CollectionRunStore(self.ctl).resume(current)
+                    return current
             except Exception:
                 pass
         try:
             from operations.collection_runs import CollectionRunStore
             with self._ctl_lock:
                 store = CollectionRunStore(self.ctl)
+                if not current:
+                    # 调度器重启后内存编号会丢失；最近一轮若是用户暂停，
+                    # 仍应继续这条运行记录，而不是把起始时间重置为重启后。
+                    row = self.ctl.execute(
+                        "SELECT run_id, status FROM collection_runs "
+                        "WHERE task_id = ? ORDER BY started_at DESC LIMIT 1",
+                        (task_id,),
+                    ).fetchone()
+                    if row and row["status"] == "paused":
+                        current = str(row["run_id"])
+                        store.resume(current)
+                        self._collection_run_ids[task_id] = current
+                        return current
                 run_id = store.create(
                     task_id,
                     task.get("platform") or "unknown",

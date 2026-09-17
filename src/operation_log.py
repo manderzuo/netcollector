@@ -107,10 +107,19 @@ class OperationLog:
         with self._lock:
             if not self._records and os.path.exists(self.path):
                 try:
-                    with open(self.path, encoding="utf-8") as stream:
-                        for line in stream.readlines()[-self.memory_limit:]:
+                    with open(self.path, "rb") as stream:
+                        # 不再用 readlines() 读取整个历史文件后再切片。运行数天
+                        # 后日志可能很大，诊断页首次刷新会因此卡住；只读取一个
+                        # 有上限的尾部窗口，保证内存和启动延迟可控。
+                        stream.seek(0, os.SEEK_END)
+                        file_size = stream.tell()
+                        tail_bytes = max(1024 * 1024, self.memory_limit * 8192)
+                        stream.seek(max(0, file_size - tail_bytes), os.SEEK_SET)
+                        if file_size > tail_bytes:
+                            stream.readline()  # 丢弃被截断的首行
+                        for raw_line in stream.readlines()[-self.memory_limit:]:
                             try:
-                                item = json.loads(line)
+                                item = json.loads(raw_line.decode("utf-8"))
                             except (TypeError, ValueError):
                                 continue
                             if isinstance(item, dict) and "message" in item:

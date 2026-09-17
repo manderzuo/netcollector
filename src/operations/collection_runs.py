@@ -76,6 +76,18 @@ class CollectionRunStore:
         if status:
             self.event(run_id, "lifecycle", f"run_{status}", stop_reason or status, {})
 
+    def resume(self, run_id: str, message: str = "采集运行继续") -> None:
+        """恢复暂停的同一轮运行，保留原 started_at。"""
+        cur = self.conn.execute(
+            "UPDATE collection_runs SET status = 'running', stop_reason = NULL, "
+            "finished_at = NULL WHERE run_id = ? AND status = 'paused'",
+            (str(run_id),),
+        )
+        if cur.rowcount != 1:
+            raise KeyError(f"暂停中的采集运行不存在: {run_id}")
+        self.conn.commit()
+        self.event(run_id, "lifecycle", "run_resumed", message, {})
+
     def event(self, run_id: str, stage: str, event_type: str, message: str = "",
               payload: Optional[dict] = None) -> int:
         cur = self.conn.execute(

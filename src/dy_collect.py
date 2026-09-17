@@ -52,6 +52,18 @@ class HumanBlock(Exception):
         super().__init__(str(message or self.reason))
 
 
+def _trace_emit(c, event: str, **fields):
+    """把评论分页关键状态写入 CDP 结构化日志，不影响采集流程。"""
+    trace = getattr(c, "_trace", None)
+    emit = getattr(trace, "emit", None)
+    if not callable(emit):
+        return
+    try:
+        emit(event, **fields)
+    except Exception:
+        pass
+
+
 class SearchVideosResult(list):
     """阶段 A 的结果，同时携带“达到目标/确认无更多”的终止信息。
 
@@ -639,10 +651,19 @@ TRIGGER_JS = '''(function(){
     // 优先寻找真正可滚动的评论容器，不能命中单条评论节点。
     const visible=(el)=>{if(!el)return false;const s=getComputedStyle(el),r=el.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity||1)>0&&r.width>0&&r.height>0;};
     const selectors=['.comment-mainContent','.comment-container','.route-scroll-container','[data-e2e="scroll-container"]','[class*="scroll-container"]','[class*="comment-"]','[class*="comment"]'];
+    const commentish=(el)=>{const v=`${el.className||''} ${el.id||''} ${el.getAttribute?.('aria-label')||''}`;return /comment|评论/i.test(v);};
     const scrollables=selectors.flatMap(sel=>[...document.querySelectorAll(sel)])
       .filter(el=>visible(el)&&Number(el.scrollHeight||0)-Number(el.clientHeight||0)>20);
-    scrollables.sort((a,b)=>(Number(b.scrollHeight||0)-Number(b.clientHeight||0))
-      -(Number(a.scrollHeight||0)-Number(a.clientHeight||0)));
+    // 某些版本的抖音不使用固定的评论容器 class。已知选择器没有命中时，
+    // 从可滚动的 div/section/main/ul 中补找带评论标记或评论子节点的容器。
+    if(!scrollables.length){
+      for(const el of document.querySelectorAll('div,section,main,ul')){
+        if(!visible(el)||Number(el.scrollHeight||0)-Number(el.clientHeight||0)<=20)continue;
+        if(commentish(el)||el.querySelector?.('[class*="comment"],[data-e2e*="comment"]'))scrollables.push(el);
+      }
+    }
+    const scrollScore=(el)=>Number(el.scrollHeight||0)-Number(el.clientHeight||0)+(commentish(el)?1000000:0);
+    scrollables.sort((a,b)=>scrollScore(b)-scrollScore(a));
     const sc=scrollables[0];
     if(sc){try{
       sc.focus?.();
@@ -696,7 +717,14 @@ TRIGGER_JS = '''(function(){
     }
     const scope=sc||document.body;
     const scopeText=String(scope?.innerText||scope?.textContent||'').replace(/\s+/g,' ');
+    const wholeText=String(document.body?.innerText||document.body?.textContent||'').replace(/\s+/g,' ');
+    const parseCount=(raw,wan)=>{const n=Number(String(raw||'').replace(/[,.]/g,''));return Number.isFinite(n)?(wan?n*10000:n):0;};
+    let declaredCount=0;
+    for(const m of wholeText.matchAll(/评论\s*[（(]?\s*([\d,.]+)\s*(万)?/g)){
+      declaredCount=Math.max(declaredCount,parseCount(m[1],!!m[2]));
+    }
     return {acted, clicked:clicked.length, labels:clicked, before, after, max, atBottom,
+      scrollable:!!sc, declaredCount,
       endText:/暂时没有更多评论|没有更多评论|已加载全部评论|评论已加载完/.test(scopeText),
       commentCount:document.querySelectorAll('.comment-item,[data-e2e="comment-item"]').length};
   }catch(e){return {acted:false, clicked:0, labels:[]};}
@@ -772,6 +800,12 @@ async def fetch_comments(c, sid, vid_url, quiet=12, max_work=900,
     all_comments = {}
     processed = set()
     primary_no_more = False
+    initial_response_count = None
+    initial_comment_count = 0
+    trigger_rounds = 0
+    scroll_progress_rounds = 0
+    pagination_evidence = False
+    termination_reason = "work_deadline"
     now = _time.time()
     last_data_at = now
     last_trigger = now
@@ -801,7 +835,7 @@ async def fetch_comments(c, sid, vid_url, quiet=12, max_work=900,
 
     async def drain_bodies(limit=None):
         """尽快读取响应体，避免等到安静窗口结束后 body 已被 Chromium 回收。"""
-        nonlocal primary_no_more, last_data_at
+        nonlocal primary_no_more, last_data_at, initial_response_count, initial_comment_count
         current = _time.time()
         ready = [rid for rid in response_order if rid not in processed and (
             rid in finished or current - float(responses[rid]["received_at"]) >= 3.0
@@ -828,6 +862,11 @@ async def fetch_comments(c, sid, vid_url, quiet=12, max_work=900,
                     last_data_at = _time.time()
                 if not is_reply and more is False:
                     primary_no_more = True
+                if rows and initial_response_count is None:
+                    # 首批接口可能一次返回 20/50/100 条；has_more=false 不能
+                    # 在第一次响应后直接结束，必须先完成至少一次分页探测。
+                    initial_response_count = len(response_order)
+                    initial_comment_count = len(all_comments)
                 processed.add(rid)
             except Exception:
                 # 未完成的响应留到下一轮重试；已完成但 body 已被回收的响应直接跳过。
@@ -836,6 +875,10 @@ async def fetch_comments(c, sid, vid_url, quiet=12, max_work=900,
         return added_total
 
     try:
+        _trace_emit(
+            c, "douyin_comment_scan_started",
+            url=str(vid_url).split("?", 1)[0], session_id=sid,
+        )
         await c.cmd("Network.enable", {}, session_id=sid)
         stop_response = c.on("Network.responseReceived", on_response)
         stop_finished = c.on("Network.loadingFinished", on_finished)
@@ -884,7 +927,16 @@ async def fetch_comments(c, sid, vid_url, quiet=12, max_work=900,
                 try:
                     trigger_result = await c.eval(TRIGGER_JS, sid) or {}
                     if isinstance(trigger_result, dict):
+                        trigger_rounds += 1
                         state = trigger_result
+                        before_top = float(trigger_result.get("before") or 0)
+                        after_top = float(trigger_result.get("after") or 0)
+                        if after_top > before_top + 2:
+                            scroll_progress_rounds += 1
+                        if (scroll_progress_rounds or trigger_result.get("clicked") or
+                                (initial_response_count is not None and
+                                 len(response_order) > initial_response_count)):
+                            pagination_evidence = True
                         labels = []
                         clicked = 0
                         if not expand_disabled:
@@ -912,28 +964,54 @@ async def fetch_comments(c, sid, vid_url, quiet=12, max_work=900,
             pending = any(rid not in processed for rid in response_order)
             if added:
                 bottom_stable_rounds = 0
-            # API 明确返回 has_more=0 时，不再依赖短安静窗口；仍等已收到的
-            # response body 处理完，保证最后一页不会丢。
-            if primary_no_more and not pending:
+            reported_count = int(state.get("declaredCount") or 0)
+            visible_count = int(state.get("commentCount") or 0)
+            reported_gap = reported_count > visible_count + 20
+            pagination_response_seen = (
+                initial_response_count is not None and
+                len(response_order) > initial_response_count
+            )
+            pagination_ready = trigger_rounds >= 2 and (
+                not reported_gap or pagination_response_seen or
+                scroll_progress_rounds >= 2
+            )
+            # API 明确返回 has_more=0 也不能覆盖页面上“700 条、当前只挂载
+            # 100 条”的证据。先滚动并观察新响应/滚动位置，再接受无更多。
+            if primary_no_more and not pending and pagination_ready:
+                termination_reason = "api_no_more_after_pagination"
                 break
             if (state.get("endText") and state.get("atBottom") and
-                    not pending and bottom_stable_rounds >= 2):
+                    not pending and bottom_stable_rounds >= 2 and pagination_ready and
+                    not reported_gap):
+                termination_reason = "page_end_text"
                 break
             # 无明确 has_more 时，只在确实滚到底、没有待处理响应、连续多轮无新增
             # 且已等待足够安静时间后结束，避免首屏几条评论被误判为全部评论。
             if (state.get("atBottom") and not pending and bottom_stable_rounds >= 3 and
-                    _time.time() - last_data_at >= quiet_seconds):
+                    _time.time() - last_data_at >= quiet_seconds and
+                    pagination_ready and not reported_gap):
+                termination_reason = "bottom_quiet"
                 break
             await asyncio.sleep(.6)
 
         # 最后一轮响应可能恰好在截止/安静判断后完成；尽力把所有可读 body 收完。
         await drain_bodies()
         return list(all_comments.values())
+    except BaseException as exc:
+        termination_reason = f"error:{type(exc).__name__}"
+        raise
     finally:
         if callable(stop_response):
             stop_response()
         if callable(stop_finished):
             stop_finished()
+        _trace_emit(
+            c, "douyin_comment_scan_finished", total=len(all_comments),
+            response_count=len(response_order), processed_count=len(processed),
+            trigger_rounds=trigger_rounds, scroll_progress_rounds=scroll_progress_rounds,
+            pagination_evidence=pagination_evidence, primary_no_more=primary_no_more,
+            termination_reason=termination_reason,
+        )
 
 
 def _absorb_comment(all_comments: dict, cm: dict, parent_id: str):

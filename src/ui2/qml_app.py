@@ -119,6 +119,11 @@ class QmlBridge(QObject):
         self._view_signal_timer = QTimer(self)
         self._view_signal_timer.setSingleShot(True)
         self._view_signal_timer.timeout.connect(self._flush_pending_view)
+        # 诊断页可能在页面进入、手动刷新和后台错误恢复时同时发起刷新。
+        # diagnostics_snapshot 会读取数据库和日志文件，重复请求只会让后台
+        # 排队，最终表现成“命令超时”。同一时间只允许一个请求在途。
+        self._diagnostics_refresh_lock = threading.Lock()
+        self._diagnostics_refresh_inflight = False
         self._last_published_message_args: dict[str, Any] = {
             "page": 1, "platform": "", "account_id": "0",
             "unread_only": False, "message_type": "",
@@ -1787,11 +1792,32 @@ class QmlBridge(QObject):
 
     @Slot()
     def refreshDiagnostics(self) -> None:
+        with self._diagnostics_refresh_lock:
+            if self._diagnostics_refresh_inflight:
+                return
+            self._diagnostics_refresh_inflight = True
+
+        def finish() -> None:
+            with self._diagnostics_refresh_lock:
+                self._diagnostics_refresh_inflight = False
+
+        def on_success(result) -> None:
+            try:
+                self._apply_diagnostics(result)
+            finally:
+                finish()
+
+        def on_error(exc: Exception) -> None:
+            try:
+                self._on_command_error(exc)
+            finally:
+                finish()
+
         self._bridge.command_async(
             "diagnostics_snapshot",
             {},
-            on_success=lambda result: self._apply_diagnostics(result),
-            on_error=self._on_command_error,
+            on_success=on_success,
+            on_error=on_error,
         )
 
     @Slot()
