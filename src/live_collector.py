@@ -66,6 +66,24 @@ PLATFORM_ALIAS = {"douyin": "douyin", "dy": "douyin",
                   "xhs": "xhs", "xiaohongshu": "xhs",
                   "kuaishou": "kuaishou", "ks": "kuaishou", "快手": "kuaishou"}
 
+
+class CollectorTimeoutError(TimeoutError):
+    """带采集阶段上下文的超时，避免日志只剩一个空的 ``TimeoutError``。"""
+
+    def __init__(self, operation: str, timeout=None, cause=None):
+        self.operation = str(operation or "采集操作")
+        self.timeout = timeout
+        # LiveCollector 在同一个作品上重建连接并重试一次后置位；scheduler
+        # 看到这个标记就暂停等待人工继续，避免再次无限重复超长等待。
+        self.connection_retry_attempted = False
+        if timeout is None:
+            message = f"{self.operation} 内部超时（CDP/页面操作超时）"
+        else:
+            message = f"{self.operation} 超时（等待 {float(timeout):g} 秒）"
+        if cause and str(cause):
+            message += f"：{cause}"
+        super().__init__(message)
+
 # ---------------------------------------------------------------------------
 # 小红书节奏下限（代码内强制，不依赖任务参数）
 #
@@ -409,11 +427,16 @@ class _PlatformCtx:
 
     def fetch_comments(self, vid, url="", xsec_token="", platform=None,
                        pause_event=None, cancel_event=None):
-        # 单作品评论最多运行 300 秒；比搜索阶段更需要等待懒加载，
-        # 但仍保留比采集器 max_work 略长的线程级兜底。
+        # 单作品评论允许更长的分页窗口；线程级兜底必须略长于采集器
+        # max_work，否则慢页面会被外层先取消，最终只得到一个无上下文的
+        # TimeoutError。超时后 LiveCollector 会重建 CDP 上下文并重试一次。
         # 小红书额外放宽：激进降频下单篇笔记包含节奏下限等待和长休，
         # 超时会把正常采集取消掉并误判为失败，因此给足余量。
-        timeout = 900 if self.platform == "xhs" else 360
+        timeout = {
+            "douyin": 960,
+            "xhs": 900,
+            "kuaishou": 480,
+        }.get(self.platform, 480)
         return self._wrap_human(lambda: self._run_sync(
             self._fetch, vid, url, xsec_token, pause_event, cancel_event,
             timeout=timeout))
@@ -421,13 +444,23 @@ class _PlatformCtx:
     def _run_sync(self, coro_fn, *args, timeout=180):
         with self.lock:
             fut = asyncio.run_coroutine_threadsafe(coro_fn(*args), self.loop)
+            operation = getattr(coro_fn, "__name__", "采集操作")
             # timeout=None 表示搜索阶段一直等待采集器返回终止元数据；
             # 单次 CDP 命令仍由 cdp.py 自身的命令级超时保护。
             if timeout is None:
-                return fut.result()
+                try:
+                    return fut.result()
+                except CollectorTimeoutError:
+                    raise
+                except (TimeoutError, asyncio.TimeoutError) as exc:
+                    raise CollectorTimeoutError(
+                        operation, cause=exc
+                    ) from exc
             try:
                 return fut.result(timeout=timeout)
-            except (TimeoutError, asyncio.TimeoutError):
+            except CollectorTimeoutError:
+                raise
+            except (TimeoutError, asyncio.TimeoutError) as exc:
                 # concurrent.futures.Future 超时后，底层协程默认仍会在事件
                 # 循环里继续执行。若不取消，它会继续占用同一个平台上下文，
                 # 后续 URL 虽然已被 scheduler 取出，却无法真正打开详情页，
@@ -437,7 +470,9 @@ class _PlatformCtx:
                     fut.result(timeout=2)
                 except Exception:
                     pass
-                raise
+                raise CollectorTimeoutError(
+                    operation, timeout=timeout, cause=exc
+                ) from exc
 
 
 class LiveCollector(Collector):
@@ -610,6 +645,23 @@ class LiveCollector(Collector):
         ctx = self._ctx(plat, window_id=window_id)
         try:
             return ctx.fetch_comments(vid, url, pause_event=pause_event, cancel_event=cancel_event)
+        except CollectorTimeoutError as exc:
+            # 超时通常意味着页面事件队列或 CDP 通道已经失去响应；继续复用
+            # 原上下文只会把同一把锁和同一个 websocket 带入下一个作品。重建
+            # 窗口连接后仅重试当前作品一次，避免一个异常作品无限循环。
+            print(
+                f"[LiveCollector] {plat} 作品 {vid} 采集超时，"
+                f"正在重建 CDP 连接并重试一次：{exc}",
+                flush=True,
+            )
+            fresh = self._refresh_ctx(plat, window_id, old_ctx=ctx, cause=exc)
+            try:
+                return fresh.fetch_comments(
+                    vid, url, pause_event=pause_event, cancel_event=cancel_event
+                )
+            except CollectorTimeoutError as retry_exc:
+                retry_exc.connection_retry_attempted = True
+                raise
         except Exception as exc:
             if not _is_connection_closed_error(exc):
                 raise

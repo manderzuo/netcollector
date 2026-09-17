@@ -89,6 +89,8 @@ _RUNTIME_LEASE_TIMEOUT = 15.0
 # 日志的旧路径。队列线程会把短时间内到达的多个作品合并到这个上限。
 _COMMENT_ENRICHMENT_BATCH_SIZE = 500
 _COMMENT_ENRICHMENT_COALESCE_SECONDS = 0.15
+_COMMENT_ENRICHMENT_DB_CHUNK_SIZE = 50
+_COMMENT_ENRICHMENT_DB_RETRIES = 3
 
 # 账号表允许本调度器直接写入的列（契约 DDL 核心字段，白名单防手滑）
 _ACCT_WRITABLE = {
@@ -242,7 +244,7 @@ class Scheduler:
         )  # GUI/启动线程/轮询线程共享，访问由 _lock 保护
         self.ctl = sqlite3.connect(db_path, check_same_thread=False)  # 跨线程写（冻结/审计/任务终态）
         self.ctl.row_factory = sqlite3.Row
-        self.ctl.execute("PRAGMA busy_timeout=5000")
+        self.ctl.execute("PRAGMA busy_timeout=10000")
         self.ctl.execute("PRAGMA journal_mode=WAL")
         self.ctl.execute("PRAGMA foreign_keys=ON")
         self.collector = collector if collector is not None else FakeCollector()
@@ -620,9 +622,15 @@ class Scheduler:
                 lead_items.append((int(comment_id), context))
                 intent_items.append((comment_id, comment))
 
-            # 线索、证据、评分历史统一在一个批事务中处理；单条异常由
-            # LeadService 的 savepoint 隔离，不能让整批评论回滚或拖死队列。
-            lead_results = lead_service.ingest_comments(lead_items)
+            # 单个大事务会长时间占用 SQLite 写锁，采集线程的评论落库、状态
+            # 查询和 GUI 命令就会一起排队。拆成小块，并只对明确的锁冲突重试，
+            # 既保留批处理吞吐，也不把正常业务错误重复执行。
+            lead_results = []
+            for offset in range(0, len(lead_items), _COMMENT_ENRICHMENT_DB_CHUNK_SIZE):
+                lead_results.extend(self._ingest_comment_batch_with_retry(
+                    lead_service,
+                    lead_items[offset:offset + _COMMENT_ENRICHMENT_DB_CHUNK_SIZE],
+                ))
             for result in lead_results:
                 if result.get("error"):
                     self._emit_log(
@@ -681,6 +689,70 @@ class Scheduler:
                 conn.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def _is_sqlite_lock_error(value) -> bool:
+        """只识别可安全重试的 SQLite 写锁冲突。"""
+        text = str(value or "").lower()
+        return "database is locked" in text or "database table is locked" in text
+
+    def _ingest_comment_batch_with_retry(self, lead_service, items: list[tuple]) -> list[dict]:
+        """小批量生成线索；把 LeadService 吞掉的锁错误重新放回重试队列。"""
+        original = list(items or [])
+        if not original:
+            return []
+        pending = original
+        results_by_comment = {}
+        for attempt in range(_COMMENT_ENRICHMENT_DB_RETRIES + 1):
+            try:
+                raw_results = lead_service.ingest_comments(pending)
+            except Exception as exc:  # noqa: BLE001
+                if not self._is_sqlite_lock_error(exc) or attempt >= _COMMENT_ENRICHMENT_DB_RETRIES:
+                    raise
+                time.sleep(0.25 * (2 ** attempt))
+                continue
+
+            result_by_id = {
+                int(result["comment_id"]): result
+                for result in (raw_results or [])
+                if isinstance(result, dict) and result.get("comment_id") is not None
+            }
+            locked_items = []
+            for comment_id, _context in pending:
+                cid = int(comment_id)
+                result = result_by_id.get(cid)
+                if result is None:
+                    # LeadService 当前按输入返回；这个保护让异常返回不会让
+                    # outbox/意向阶段误把缺失结果当成成功。
+                    results_by_comment[cid] = {
+                        "comment_id": cid,
+                        "error": "线索批处理未返回结果",
+                    }
+                elif self._is_sqlite_lock_error(result.get("error")):
+                    locked_items.append((comment_id, _context))
+                else:
+                    results_by_comment[cid] = result
+
+            if not locked_items:
+                break
+            if attempt >= _COMMENT_ENRICHMENT_DB_RETRIES:
+                for comment_id, _context in locked_items:
+                    cid = int(comment_id)
+                    results_by_comment[cid] = result_by_id.get(cid) or {
+                        "comment_id": cid,
+                        "error": "database is locked（重试后仍未释放）",
+                    }
+                break
+            pending = locked_items
+            time.sleep(0.25 * (2 ** attempt))
+
+        return [
+            results_by_comment.get(int(comment_id), {
+                "comment_id": int(comment_id),
+                "error": "线索批处理未返回结果",
+            })
+            for comment_id, _context in original
+        ]
 
     @staticmethod
     def _record_task_error(conn, task_id: int, detail: str) -> None:
@@ -2850,6 +2922,7 @@ class Scheduler:
             # 断点恢复后无法知道本批次已在采集器内运行了多久，按当前 worker
             # 启动时刻重新计时，宁可少减也不让恢复流程跳过应有的保护时间。
             batch_started_at = time.monotonic() if local_batch else None
+            timeout_retries = {}
             acct_row = conn.execute(
                 "SELECT bb_window_id FROM accounts WHERE id = ?", (account_id,)
             ).fetchone()
@@ -2974,6 +3047,7 @@ class Scheduler:
                     self._finish_video(conn, vid["id"])
                     self._bump_account(conn, account_id)  # processed+1, batch+1
                     local_batch += 1
+                    timeout_retries.pop(int(vid["id"]), None)
                     conn.commit()
                     if local_batch >= batch_size and self._has_more(conn, task_id, account_id, account_name):
                         effective_cd = self._effective_batch_cooldown(
@@ -3018,6 +3092,36 @@ class Scheduler:
                         self._emit_log(
                             f"[scheduler] 账号 {account_name} 浏览器连接断开，"
                             f"任务 {task_id} 已暂停，作品 {vid['vid']} 未计入失败；请重开浏览器后继续"
+                        )
+                        break
+                    if isinstance(e, TimeoutError):
+                        video_id = int(vid["id"])
+                        retry_count = int(timeout_retries.get(video_id, 0))
+                        # LiveCollector 已经在同一作品上重建 CDP 并重试过一次；
+                        # 其它采集器则由 worker 自动再试一次。两次都超时就
+                        # 保留 assigned 状态并暂停任务，用户继续后从该作品
+                        # 断点重试，不能把它静默标成失败或让线程无限空转。
+                        if not getattr(e, "connection_retry_attempted", False) and retry_count < 1:
+                            timeout_retries[video_id] = retry_count + 1
+                            self._release_video_for_retry(conn, video_id)
+                            retry_detail = f"采集超时，已保留当前作品待自动重试：{detail}"
+                            self._record_task_error(conn, task_id, retry_detail)
+                            conn.commit()
+                            self._emit_log(
+                                f"[scheduler] 账号 {account_name} 作品 {vid['vid']} 采集超时，"
+                                "已释放并自动重试当前作品一次：" + detail
+                            )
+                            continue
+                        self._release_video_for_retry(conn, video_id)
+                        retry_detail = f"采集超时重试后仍未完成，已保留当前作品：{detail}"
+                        self._record_task_error(conn, task_id, retry_detail)
+                        conn.commit()
+                        self.pause(task_id)
+                        with self._lock:
+                            self._task_status[task_id] = "paused"
+                        self._emit_log(
+                            f"[scheduler] 账号 {account_name} 作品 {vid['vid']} 多次采集超时，"
+                            f"任务 {task_id} 已暂停；作品未计入失败，请处理浏览器后继续：{detail}"
                         )
                         break
                     self._fail_video(conn, vid["id"])

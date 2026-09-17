@@ -9,17 +9,18 @@
               避免「图文当视频打开 → 视频不存在/回推荐流」。
   阶段 B 评论：逐作品 Page.navigate 进作品页 → 滚动 .route-scroll-container +
               点「加载更多」类按钮 → 拦 /comment/list/ + /comment/list/reply/ →
-              安静窗口(QuietSeconds)数据驱动终止，按 cid 去重合并。
+              到底/接口终止信号驱动结束，按 cid 去重合并。
   评论采集：持续读取页面/接口能加载到的一级评论和楼中回复，按平台结束信号停止。
 
 用法:
-  python dy_collect.py --keyword 快递柜 [--limit 20] [--cooldown 3] [--quiet 4] [--max-work 300]
+  python dy_collect.py --keyword 快递柜 [--limit 20] [--cooldown 3] [--quiet 12] [--max-work 900]
 输出: out/抖音-<keyword>/videos.json + comments.json + dy_意向客户.csv (7列)
 """
 
 import argparse
 import asyncio
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -633,14 +634,38 @@ def parse_stream_ndjson(raw: str) -> list:
 # note(图文) 评论区在右侧面板，容器为 .comment-mainContent 等；video 在 .route-scroll-container
 TRIGGER_JS = '''(function(){
   try{
-    let acted=false;
+    let acted=false, before=0, after=0, max=0, atBottom=false;
     const clicked=[];
     // 优先寻找真正可滚动的评论容器，不能命中单条评论节点。
     const visible=(el)=>{if(!el)return false;const s=getComputedStyle(el),r=el.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity||1)>0&&r.width>0&&r.height>0;};
     const selectors=['.comment-mainContent','.comment-container','.route-scroll-container','[data-e2e="scroll-container"]','[class*="scroll-container"]','[class*="comment-"]','[class*="comment"]'];
-    const sc=selectors.flatMap(sel=>[...document.querySelectorAll(sel)]).find(el=>visible(el)&&Number(el.scrollHeight||0)-Number(el.clientHeight||0)>20);
-    if(sc){try{sc.focus?.();sc.scrollTop=sc.scrollHeight;sc.scrollTo?.({top:sc.scrollHeight,behavior:'instant'});acted=true;}catch(e){}}
-    else{window.scrollTo(0,document.body.scrollHeight);acted=true;}
+    const scrollables=selectors.flatMap(sel=>[...document.querySelectorAll(sel)])
+      .filter(el=>visible(el)&&Number(el.scrollHeight||0)-Number(el.clientHeight||0)>20);
+    scrollables.sort((a,b)=>(Number(b.scrollHeight||0)-Number(b.clientHeight||0))
+      -(Number(a.scrollHeight||0)-Number(a.clientHeight||0)));
+    const sc=scrollables[0];
+    if(sc){try{
+      sc.focus?.();
+      before=Number(sc.scrollTop||0);
+      max=Math.max(0,Number(sc.scrollHeight||0)-Number(sc.clientHeight||0));
+      // 分段滚动比直接跳到底部可靠：虚拟列表只有在接近当前底部时才会
+      // 请求下一页，直接设置 scrollHeight 会出现“首屏几条后就跳走”。
+      const step=Math.max(360,Math.floor(Number(sc.clientHeight||600)*.82));
+      const target=Math.min(max,before+step);
+      sc.scrollTop=target;
+      sc.scrollTo?.({top:target,behavior:'instant'});
+      after=Number(sc.scrollTop||0);
+      atBottom=after+Number(sc.clientHeight||0)>=Number(sc.scrollHeight||0)-24;
+      acted=after>before+2 || max<=20;
+    }catch(e){}}
+    else{try{
+      before=Number(window.scrollY||0);
+      window.scrollBy(0,Math.max(500,Math.floor((window.innerHeight||700)*.82)));
+      after=Number(window.scrollY||0);
+      max=Math.max(0,Number(document.documentElement.scrollHeight||0)-(window.innerHeight||0));
+      atBottom=after+(window.innerHeight||0)>=Number(document.documentElement.scrollHeight||0)-24;
+      acted=true;
+    }catch(e){}}
     const texts=['点击加载更多','加载更多','展开更多','查看全部','展开','更多评论'];
     const expandRe=/(展开|查看|显示|更多)\s*(?:更多\s*)?\d*\s*(?:条)?\s*(?:回复|评论)/;
     const isVisible=(e)=>{if(!e)return false;const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity||1)>0&&r.width>0&&r.height>0;};
@@ -669,7 +694,11 @@ TRIGGER_JS = '''(function(){
         clicked.push(shortText(b).slice(0,80) || 'reply-expand-button');
       }catch(e){}
     }
-    return {acted, clicked:clicked.length, labels:clicked};
+    const scope=sc||document.body;
+    const scopeText=String(scope?.innerText||scope?.textContent||'').replace(/\s+/g,' ');
+    return {acted, clicked:clicked.length, labels:clicked, before, after, max, atBottom,
+      endText:/暂时没有更多评论|没有更多评论|已加载全部评论|评论已加载完/.test(scopeText),
+      commentCount:document.querySelectorAll('.comment-item,[data-e2e="comment-item"]').length};
   }catch(e){return {acted:false, clicked:0, labels:[]};}
 })()'''
 
@@ -699,81 +728,168 @@ OPEN_NOTE_COMMENTS_JS = '''(function(){
 })()'''
 
 
-async def fetch_comments(c, sid, vid_url, quiet=4, max_work=300,
+def _comment_payload(data):
+    """提取抖音评论响应及 has_more，兼容响应外层包裹变化。"""
+    if not isinstance(data, dict):
+        return [], None
+    comments = data.get("comments")
+    if isinstance(comments, list):
+        more = None
+        for key in ("has_more", "hasMore", "has_more_comments", "hasMoreComments", "more"):
+            if key not in data:
+                continue
+            value = data.get(key)
+            if isinstance(value, bool):
+                more = value
+            elif isinstance(value, (int, float)):
+                more = bool(value)
+            elif str(value).strip().lower() in {"0", "false", "no"}:
+                more = False
+            elif str(value).strip().lower() in {"1", "true", "yes"}:
+                more = True
+            if more is not None:
+                break
+        return comments, more
+    for key in ("data", "result", "response"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            comments, more = _comment_payload(nested)
+            if comments or more is not None:
+                return comments, more
+    return [], None
+
+
+async def fetch_comments(c, sid, vid_url, quiet=12, max_work=900,
                          pause_event=None, cancel_event=None) -> list:
     """阶段 B：导航作品页，拦 /comment/list/ + reply 全量翻页抓评论。
 
-    quiet: 连续无新评论响应的安静秒数，达到即认为拉完（数据驱动终止）。
-    max_work: 单作品最长采集窗口（秒）。
+    quiet: 连续无新增评论的安静秒数；只有滚动到底部、没有待处理响应时才生效。
+    max_work: 单作品最长采集窗口（秒），大评论区允许更长时间分页。
     """
-    recv = [
-        {"id": "doc", "url": ""},  # placeholder to keep list ref
-    ]
-    responses = []
-    await c.cmd("Network.enable", {}, session_id=sid)
-    stop = c.on("Network.responseReceived", lambda p: responses.append((p.get("response", {}).get("url", ""), p.get("requestId", ""))))
-    # 导航并等待
-    await c.navigate(vid_url, sid)
-    await asyncio.sleep(6)
-    blk = await probe_blocked(c, sid)
-    if blk:
-        raise HumanBlock(blk)
-
-    # 打开评论区（note 默认收起）：先让评论控件获得焦点，再点击。
-    # note 页评论滚动绑定在右侧面板，不能只滚主文档。
-    try:
-        if "/note/" in str(vid_url).lower():
-            await c.eval(OPEN_NOTE_COMMENTS_JS, sid)
-        else:
-            await c.eval('''(function(){
-              const els=[...document.querySelectorAll('span,div,button')];
-              const el=[...els].reverse().find(e=>{const t=(e.textContent||'').trim(); return /评论\\s*\\(?\\d/.test(t)&&t.length<25&&e.children.length<=2;});
-              if(el){el.focus?.();el.click(); return el.textContent.trim();}
-              return 'not-found';
-            })()''', sid)
-        await asyncio.sleep(2)
-    except Exception:
-        pass
-
-    comment_resp = {}   # rid -> url (一级)
-    reply_resp = {}     # rid -> url (二级)
-    last_seen = _time.time()
-    last_trigger = _time.time()
-    work_deadline = _time.time() + max_work
-    # 楼中楼入口是动态节点。验证码/灰屏/接口失败时，页面可能不断重新
-    # 渲染同一批入口；没有熔断就会反复点击，拖到单作品的最大工作时长。
+    responses = {}       # rid -> {url, received_at}
+    response_order = []
+    finished = set()
+    all_comments = {}
+    processed = set()
+    primary_no_more = False
+    now = _time.time()
+    last_data_at = now
+    last_trigger = now
+    last_probe = 0.0
+    work_deadline = now + max(60.0, float(max_work or 900))
+    quiet_seconds = max(10.0, float(quiet or 12))
+    bottom_stable_rounds = 0
     expand_signature = ""
     expand_stalled_rounds = 0
     expand_click_total = 0
     expand_disabled = False
+    stop_response = None
+    stop_finished = None
 
-    while _time.time() < work_deadline:
-        while pause_event is not None and not pause_event.is_set():
-            if cancel_event is not None and cancel_event.is_set():
-                stop()
-                return []
-            await asyncio.sleep(.2)
-        if cancel_event is not None and cancel_event.is_set():
-            stop()
-            return []
-        # 验证可能在滚动/加载评论过程中才出现，不能只在导航后检查一次。
-        if _time.time() - last_trigger >= 1.5:
+    def on_response(payload):
+        response = payload.get("response") or {}
+        url = str(response.get("url") or "")
+        rid = str(payload.get("requestId") or "")
+        if rid and "/comment/list/" in url:
+            responses[rid] = {"url": url, "received_at": _time.time()}
+            response_order.append(rid)
+
+    def on_finished(payload):
+        rid = str(payload.get("requestId") or "")
+        if rid:
+            finished.add(rid)
+
+    async def drain_bodies(limit=None):
+        """尽快读取响应体，避免等到安静窗口结束后 body 已被 Chromium 回收。"""
+        nonlocal primary_no_more, last_data_at
+        current = _time.time()
+        ready = [rid for rid in response_order if rid not in processed and (
+            rid in finished or current - float(responses[rid]["received_at"]) >= 3.0
+        )]
+        if limit is not None:
+            ready = ready[:int(limit)]
+        added_total = 0
+        for rid in ready:
+            info = responses.get(rid) or {}
             try:
+                # 响应体属于旁观抓包资源，过期/异常时不应让一批响应各等
+                # 默认 15 秒，进而把页面采集拖成外层 timeout。
+                body = await c.get_body(rid, sid, timeout=5.0)
+                data = json.loads(body)
+                rows, more = _comment_payload(data)
+                before = len(all_comments)
+                is_reply = "/comment/list/reply/" in str(info.get("url") or "")
+                for cm in rows:
+                    parent_id = str(cm.get("parent_comment_id", "")) if is_reply and isinstance(cm, dict) else ""
+                    _absorb_comment(all_comments, cm, parent_id=parent_id)
+                added = len(all_comments) - before
+                if added:
+                    added_total += added
+                    last_data_at = _time.time()
+                if not is_reply and more is False:
+                    primary_no_more = True
+                processed.add(rid)
+            except Exception:
+                # 未完成的响应留到下一轮重试；已完成但 body 已被回收的响应直接跳过。
+                if rid in finished:
+                    processed.add(rid)
+        return added_total
+
+    try:
+        await c.cmd("Network.enable", {}, session_id=sid)
+        stop_response = c.on("Network.responseReceived", on_response)
+        stop_finished = c.on("Network.loadingFinished", on_finished)
+        await c.navigate(vid_url, sid)
+        await asyncio.sleep(6)
+        blk = await probe_blocked(c, sid)
+        if blk:
+            raise HumanBlock(blk)
+
+        # 打开评论区（note 默认收起）：先让评论控件获得焦点，再点击。
+        try:
+            if "/note/" in str(vid_url).lower():
+                await c.eval(OPEN_NOTE_COMMENTS_JS, sid)
+            else:
+                await c.eval('''(function(){
+                  const els=[...document.querySelectorAll('span,div,button')];
+                  const el=[...els].reverse().find(e=>{const t=(e.textContent||'').trim(); return /评论\\s*\\(?\\d/.test(t)&&t.length<25&&e.children.length<=2;});
+                  if(el){el.focus?.();el.click(); return el.textContent.trim();}
+                  return 'not-found';
+                })()''', sid)
+            await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        while _time.time() < work_deadline:
+            while pause_event is not None and not pause_event.is_set():
+                if cancel_event is not None and cancel_event.is_set():
+                    return []
+                await asyncio.sleep(.2)
+            if cancel_event is not None and cancel_event.is_set():
+                return []
+
+            now = _time.time()
+            # 风控探测不必每 1.5 秒发送两次滚轮事件；过密探测会和评论懒加载抢
+            # 同一个页面事件队列，反而增加 CDP 超时概率。
+            if now - last_probe >= 5.0:
+                last_probe = now
                 blk = await probe_blocked(c, sid)
                 if blk:
                     raise HumanBlock(blk)
-            except HumanBlock:
-                stop()
-                raise
-        # 每 ~2s 触发一次滚动/加载更多
-        if _time.time() - last_trigger > 2:
-            last_trigger = _time.time()
-            try:
-                if not expand_disabled:
-                    trigger_result = await c.eval(TRIGGER_JS, sid)
+
+            added = await drain_bodies(limit=12)
+            state = {}
+            if now - last_trigger >= 2.0:
+                last_trigger = now
+                try:
+                    trigger_result = await c.eval(TRIGGER_JS, sid) or {}
                     if isinstance(trigger_result, dict):
-                        labels = [str(v or "")[:80] for v in (trigger_result.get("labels") or [])]
-                        clicked = int(trigger_result.get("clicked") or len(labels) or 0)
+                        state = trigger_result
+                        labels = []
+                        clicked = 0
+                        if not expand_disabled:
+                            labels = [str(v or "")[:80] for v in (trigger_result.get("labels") or [])]
+                            clicked = int(trigger_result.get("clicked") or len(labels) or 0)
                         if clicked:
                             signature = "|".join(labels)
                             if signature and signature == expand_signature:
@@ -782,58 +898,56 @@ async def fetch_comments(c, sid, vid_url, quiet=4, max_work=300,
                                 expand_stalled_rounds = 0
                             expand_signature = signature
                             expand_click_total += clicked
-                            # 3 轮点击结果完全不变，或累计点击达到安全上限，
-                            # 认定展开失败；后续仍继续滚动和采集一级评论。
                             if expand_stalled_rounds >= 3 or expand_click_total >= 24:
                                 expand_disabled = True
-                await c.eval("window.scrollTo(0, document.body.scrollHeight)", sid)
-            except Exception:
-                pass
-        await asyncio.sleep(0.6)
-        # 读已收集响应（旁观收集器是异步追加的，直接扫列表）
-        n_new = False
-        for u, rid in list(responses):
-            if "/comment/list/reply/" in u:
-                if rid not in reply_resp:
-                    reply_resp[rid] = u
-                    last_seen = _time.time()
-                    n_new = True
-            elif "/comment/list/" in u:
-                if rid not in comment_resp:
-                    comment_resp[rid] = u
-                    last_seen = _time.time()
-                    n_new = True
-        # 数据驱动终止：安静窗口已到
-        if _time.time() - last_seen >= quiet:
-            break
+                        # 返回结果只有在本轮触发滚动时更新；added 或下一轮响应
+                        # 到达后会把稳定计数重新归零。
+                        if trigger_result.get("atBottom") and not added:
+                            bottom_stable_rounds += 1
+                        elif not trigger_result.get("atBottom"):
+                            bottom_stable_rounds = 0
+                except Exception:
+                    pass
 
-    # 拉取并解析一级评论
-    all_comments = {}
-    for rid in comment_resp:
-        try:
-            body = await c.get_body(rid, sid)
-            data = json.loads(body)
-            for cm in data.get("comments") or []:
-                _absorb_comment(all_comments, cm, parent_id="")
-        except Exception:
-            continue
-    # 拉取并解析二级评论
-    for rid in reply_resp:
-        try:
-            body = await c.get_body(rid, sid)
-            data = json.loads(body)
-            for cm in data.get("comments") or []:
-                _absorb_comment(all_comments, cm, parent_id=str(cm.get("parent_comment_id", "")))
-        except Exception:
-            continue
-    stop()
-    return list(all_comments.values())
+            pending = any(rid not in processed for rid in response_order)
+            if added:
+                bottom_stable_rounds = 0
+            # API 明确返回 has_more=0 时，不再依赖短安静窗口；仍等已收到的
+            # response body 处理完，保证最后一页不会丢。
+            if primary_no_more and not pending:
+                break
+            if (state.get("endText") and state.get("atBottom") and
+                    not pending and bottom_stable_rounds >= 2):
+                break
+            # 无明确 has_more 时，只在确实滚到底、没有待处理响应、连续多轮无新增
+            # 且已等待足够安静时间后结束，避免首屏几条评论被误判为全部评论。
+            if (state.get("atBottom") and not pending and bottom_stable_rounds >= 3 and
+                    _time.time() - last_data_at >= quiet_seconds):
+                break
+            await asyncio.sleep(.6)
+
+        # 最后一轮响应可能恰好在截止/安静判断后完成；尽力把所有可读 body 收完。
+        await drain_bodies()
+        return list(all_comments.values())
+    finally:
+        if callable(stop_response):
+            stop_response()
+        if callable(stop_finished):
+            stop_finished()
 
 
 def _absorb_comment(all_comments: dict, cm: dict, parent_id: str):
-    cid = str(cm.get("cid"))
+    if not isinstance(cm, dict):
+        return False
+    cid = str(cm.get("cid") or "").strip()
+    if not cid:
+        stable = json.dumps(
+            [cm.get("text"), cm.get("create_time"), (cm.get("user") or {}).get("uid")],
+            ensure_ascii=False, default=str,
+        )
+        cid = "auto-" + hashlib.sha1(stable.encode("utf-8", errors="replace")).hexdigest()
     if cid in all_comments:
-        return
+        return False
     ct = cm.get("create_time")
     try:
         ct_num = int(ct)
@@ -854,6 +968,7 @@ def _absorb_comment(all_comments: dict, cm: dict, parent_id: str):
         "reply_total": cm.get("reply_comment_total", 0),
         "parent_id": parent_id,
     }
+    return True
 
 
 # ---------------------------------------------------------------------------

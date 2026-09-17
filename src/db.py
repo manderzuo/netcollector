@@ -154,7 +154,9 @@ def init_db(db_path: str = None, check_same_thread: bool = True) -> sqlite3.Conn
         os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
+    # 评论线索扩展与采集线程会短暂竞争写锁；让 SQLite 等待一小段时间，
+    # 再由上层小批量/退避逻辑处理持续锁冲突。
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA_SQL)

@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 import live_collector  # noqa: E402
 import xhs_collect3  # noqa: E402
 import db  # noqa: E402
+import scheduler as scheduler_module  # noqa: E402
 from scheduler import Collector, Scheduler  # noqa: E402
 
 
@@ -272,6 +273,37 @@ class XhsPacingFloorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LargeCommentPipelineTests(unittest.TestCase):
+    def test_locked_lead_items_are_retried_without_replaying_successes(self):
+        scheduler = Scheduler.__new__(Scheduler)
+
+        class _LockingLeadService:
+            def __init__(self):
+                self.calls = 0
+
+            def ingest_comments(self, items):
+                self.calls += 1
+                if self.calls == 1:
+                    return [
+                        {"comment_id": comment_id,
+                         "error": "OperationalError: database is locked"}
+                        for comment_id, _context in items
+                    ]
+                return [
+                    {"comment_id": comment_id, "lead_id": comment_id,
+                     "created": True, "context": context}
+                    for comment_id, context in items
+                ]
+
+        service = _LockingLeadService()
+        with mock.patch.object(scheduler_module, "time") as clock:
+            clock.sleep = mock.Mock()
+            results = scheduler._ingest_comment_batch_with_retry(
+                service, [(1, {"task_id": 1}), (2, {"task_id": 1})]
+            )
+        self.assertEqual(service.calls, 2)
+        self.assertEqual([item["lead_id"] for item in results], [1, 2])
+        clock.sleep.assert_called_once()
+
     def test_comment_batch_can_commit_without_per_row_transaction(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "comments.db")
