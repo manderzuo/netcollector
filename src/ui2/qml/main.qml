@@ -1075,7 +1075,7 @@ ApplicationWindow {
                 }
                 Connections {
                     target: backend
-                    function onViewChanged() { overviewTrendCanvas.requestPaint(); overviewDonutCanvas.requestPaint() }
+                    function onSnapshotChanged() { overviewTrendCanvas.requestPaint(); overviewDonutCanvas.requestPaint() }
                 }
             }
         }
@@ -1099,8 +1099,29 @@ ApplicationWindow {
                 property bool taskRestoringPosition: false
                 property bool showCompletedTasks: false
                 property int deletingTaskId: 0
+                // 控制命令走后台线程；在响应返回前先锁定当前任务，避免
+                // 用户连续点击造成 start/pause/stop 请求叠加。
+                property var pendingTaskCommands: []
                 property int deleteCandidateId: 0
                 property string deleteCandidateKeyword: ""
+                function isTaskCommandPending(taskId) {
+                    return pendingTaskCommands.indexOf(Number(taskId || 0)) >= 0
+                }
+                function beginTaskCommand(taskId) {
+                    var id = Number(taskId || 0)
+                    if (id <= 0 || isTaskCommandPending(id)) return false
+                    var next = pendingTaskCommands.slice(0)
+                    next.push(id)
+                    pendingTaskCommands = next
+                    return true
+                }
+                function finishTaskCommand(taskId) {
+                    var id = Number(taskId || 0)
+                    var next = []
+                    for (var i = 0; i < pendingTaskCommands.length; i++)
+                        if (Number(pendingTaskCommands[i]) !== id) next.push(pendingTaskCommands[i])
+                    pendingTaskCommands = next
+                }
                 function requestDelete(task) {
                     if (deletingTaskId !== 0)
                         return
@@ -1437,9 +1458,10 @@ ApplicationWindow {
                                              spacing: 7
                                              AppButton {
                                                  Layout.preferredWidth: 58
-                                                text: window.taskActionText(modelData)
-                                                enabled: window.isRunningStatus(modelData.status) || window.canResumeStatus(modelData.status) || modelData.status === "pending"
+                                                text: tasksPage.isTaskCommandPending(modelData.id) ? "处理中…" : window.taskActionText(modelData)
+                                                enabled: !tasksPage.isTaskCommandPending(modelData.id) && (window.isRunningStatus(modelData.status) || window.canResumeStatus(modelData.status) || modelData.status === "pending")
                                                 onClicked: {
+                                                    if (!tasksPage.beginTaskCommand(modelData.id)) return
                                                     tasksPage.rememberTaskListPosition(modelData.id)
                                                     if (window.isRunningStatus(modelData.status)) backend.pauseTask(modelData.id)
                                                     else if (window.canResumeStatus(modelData.status)) backend.resumeTask(modelData.id)
@@ -1451,8 +1473,12 @@ ApplicationWindow {
                                              AppButton {
                                                 Layout.preferredWidth: 50
                                                 text: "停止"
-                                                enabled: window.isRunningStatus(modelData.status) || modelData.status === "paused"
-                                                onClicked: { tasksPage.rememberTaskListPosition(modelData.id); backend.stopTask(modelData.id) }
+                                                enabled: !tasksPage.isTaskCommandPending(modelData.id) && (window.isRunningStatus(modelData.status) || modelData.status === "paused")
+                                                onClicked: {
+                                                    if (!tasksPage.beginTaskCommand(modelData.id)) return
+                                                    tasksPage.rememberTaskListPosition(modelData.id)
+                                                    backend.stopTask(modelData.id)
+                                                }
                                                  contentItem: Text { text: parent.text; color: parent.enabled ? window.amber : "#536681"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; font.pixelSize: 12; font.family: window.uiFontFamily }
                                                  background: Rectangle { radius: window.smallRadius; color: parent.hovered ? "#3b3020" : window.panel2; border.color: parent.hovered ? window.amber : window.line }
                                             }
@@ -3401,12 +3427,14 @@ ApplicationWindow {
                         if (publishPage.publishTimeMode === "scheduled")
                             publishPage.ensureSchedulePickerSelection()
                     }
-                    function onViewChanged() {
+                    function onSnapshotChanged() {
                         // 账号列表异步返回后自动选中该平台第一个账号，让同步
                         // 按钮首次进入页面就可用，不要求用户重复选择。
                         if (publishPage.publishTab === "account")
                             publishPage.ensureAccountInfoSelection(true)
-                        else if (publishPage.publishTab === "messages")
+                    }
+                    function onPublishingChanged() {
+                        if (publishPage.publishTab === "messages")
                             publishPage.ensureMessageGroupSelection()
                     }
                 }
@@ -4872,6 +4900,9 @@ ApplicationWindow {
             } else if (page === "diagnostics") {
                 backend.refreshDiagnostics()
             }
+        }
+        function onTaskCommandFinished(taskId, command, ok, message) {
+            tasksPage.finishTaskCommand(taskId)
         }
         function onCommandFinished(command, ok, message) {
             if (String(command || "") === "create_browser_window" && ok) {
@@ -6373,7 +6404,7 @@ ApplicationWindow {
         property var keywordGroupModel: [{id: 0, label: "不使用关键词组", name: ""}]
         Connections {
             target: backend
-            function onViewChanged() {
+            function onKeywordGroupsChanged() {
                 if (taskDialog.visible) taskDialog.rebuildKeywordGroups()
             }
         }

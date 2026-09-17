@@ -3541,20 +3541,29 @@ class Scheduler:
                 self._cd_events[acc_id].set()
             if acc_id in self._human_events:
                 self._human_events[acc_id].set()
-        for t in stop_threads:
-            if t is not None:
-                t.join(timeout=3)
         phase = task_phase
-        if phase is not None and phase is not threading.current_thread():
-            phase.join(timeout=3)
         supervisor = task_supervisor
-        if supervisor is not None and supervisor is not threading.current_thread():
-            supervisor.join(timeout=3)
+        # 停止是按任务执行的控制操作，等待上限应是整个任务 3 秒，而不是
+        # 每个账号/阶段线程各等 3 秒。多账号采集时旧写法会把一次点击放大
+        # 成 3*N 秒；控制信号已经先写入数据库，剩余清理由各线程自行收尾。
+        join_deadline = time.monotonic() + 3.0
+        join_threads = list(stop_threads)
+        if phase is not None:
+            join_threads.append(phase)
+        if supervisor is not None:
+            join_threads.append(supervisor)
+        for thread in join_threads:
+            if thread is None or thread is threading.current_thread():
+                continue
+            remaining = join_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
         with self._conn_lock:
             db.update_task_status(self.conn, task_id, "aborted", "用户停止")
         with self._lock:
             self._task_status[task_id] = "aborted"
-        if phase is not threading.current_thread():
+        if (phase is None or not phase.is_alive()) and phase is not threading.current_thread():
             self._release_phase_account(task_id)
         # 不调用共享 collector.cancel()：它会把其它任务一并取消。
 

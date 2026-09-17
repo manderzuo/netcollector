@@ -674,7 +674,10 @@ class BackendService:
                 # 员工的任务和账号列表。
                 for client in clients:
                     try:
-                        snapshot = self._scoped_status_report(client)
+                        # 展示轮询允许使用 Scheduler 的短时快照缓存；命令请求
+                        # 仍走默认的实时报表。否则每 0.5 秒都会完整扫描任务、
+                        # 视频、评论和线索表，采集高峰期会争抢数据库锁。
+                        snapshot = self._scoped_status_report(client, cached=True)
                         digest = hashlib.sha256(
                             json.dumps(snapshot, ensure_ascii=False, sort_keys=True,
                                        default=str).encode("utf-8")
@@ -4344,12 +4347,12 @@ class BackendService:
         finally:
             conn.close()
 
-    def _scoped_status_report(self, client=None) -> dict[str, Any]:
+    def _scoped_status_report(self, client=None, *, cached: bool = False) -> dict[str, Any]:
         """按登录用户裁剪状态快照；管理员仍获得全量视图。"""
         scope = self._auth_scope(client)
         if client is not None and not self._client_user(client):
             return {"auth_required": True, "_auth_scope": scope}
-        snapshot = self.scheduler.status_report()
+        snapshot = self.scheduler.status_report(cached=bool(cached))
         owner_id = self._owner_user_id(client)
         if owner_id is None:
             return {**snapshot, "_auth_scope": scope}

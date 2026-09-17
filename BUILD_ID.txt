@@ -1,1 +1,1 @@
-20260917-2.2.6-runtime-bootstrap-fix-v1
+20260917-2.2.6-ui-responsiveness-fix-v1

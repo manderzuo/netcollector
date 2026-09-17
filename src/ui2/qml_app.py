@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from typing import Any, Mapping
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -74,6 +75,13 @@ except ImportError:  # pragma: no cover - python src/ui2/qml_app.py
 
 class QmlBridge(QObject):
     viewChanged = Signal()
+    # 状态快照按页面拆分通知。采集进度变化时只刷新总览/任务/账号相关
+    # 绑定，避免隐藏的线索、互动、发布和诊断页面也跟着整页重算。
+    snapshotChanged = Signal()
+    leadsChanged = Signal()
+    interactionsChanged = Signal()
+    publishingChanged = Signal()
+    diagnosticsChanged = Signal()
     keywordGroupsChanged = Signal()
     authChanged = Signal()
     backendEvent = Signal(object)
@@ -85,6 +93,9 @@ class QmlBridge(QObject):
     beijingNowTextChanged = Signal()
     updateChanged = Signal()
     updateEvent = Signal(object)
+    # 任务控制单独带回 task_id，QML 可以只锁定被点击的那一行，避免
+    # 重复发送同一个 start/pause/stop 命令而放大后台和界面的延迟。
+    taskCommandFinished = Signal(int, str, bool, str)
     # 让 QML 在耗时命令期间立即锁定危险按钮，并在失败时恢复。
     commandFinished = Signal(str, bool, str)
 
@@ -100,6 +111,14 @@ class QmlBridge(QObject):
         self._view_signal_lock = threading.Lock()
         self._view_signal_pending = False
         self._pending_view: dict | None = None
+        self._view_signal_last_applied_at = 0.0
+        # QML 页面包含多个列表和 Canvas；即使信号已合并，也不能在主线程
+        # 刚完成一次重绘后立刻再启动下一次重绘。150ms 约等于 6.6fps，
+        # 足够展示采集进度，同时给鼠标/键盘事件留下稳定的事件循环时间。
+        self._view_signal_min_interval = 0.15
+        self._view_signal_timer = QTimer(self)
+        self._view_signal_timer.setSingleShot(True)
+        self._view_signal_timer.timeout.connect(self._flush_pending_view)
         self._last_published_message_args: dict[str, Any] = {
             "page": 1, "platform": "", "account_id": "0",
             "unread_only": False, "message_type": "",
@@ -230,12 +249,59 @@ class QmlBridge(QObject):
     def _apply_view(self, view: dict) -> None:
         with self._view_signal_lock:
             pending = self._pending_view
-            self._pending_view = None
-            self._view_signal_pending = False
-        # 保留直接调用 _apply_view(dict) 的兼容性（旧版自动化/预览入口），
-        # 正常后台事件则使用锁内拿到的最新快照。
-        self._view = dict(pending if pending is not None else (view or {}))
-        self.viewChanged.emit()
+            # 直接调用 _apply_view(dict) 是旧版自动化/预览入口，必须立即
+            # 生效；后台事件则交给节流定时器，始终只发布最后一份快照。
+            direct_view = pending is None and isinstance(view, dict)
+            if direct_view:
+                self._view_signal_pending = False
+            else:
+                if pending is None:
+                    self._view_signal_pending = False
+                    return
+                now = time.monotonic()
+                elapsed = now - self._view_signal_last_applied_at
+                if pending is not None and elapsed < self._view_signal_min_interval:
+                    delay_ms = max(1, int((self._view_signal_min_interval - elapsed) * 1000))
+                    if not self._view_signal_timer.isActive():
+                        self._view_signal_timer.start(delay_ms)
+                    return
+                self._pending_view = None
+                self._view_signal_pending = False
+        # 保留直接调用 _apply_view(dict) 的兼容性；正常后台事件则使用锁内
+        # 拿到的最新快照。
+        next_view = dict(view if direct_view else (pending or {}))
+        self._publish_view(next_view)
+
+    @Slot()
+    def _flush_pending_view(self) -> None:
+        """在 Qt 主线程发布节流期间积累的最后一份状态快照。"""
+        self._apply_view(None)
+
+    def _publish_view(self, next_view: dict) -> None:
+        previous = self._view
+        self._view = dict(next_view or {})
+        self._view_signal_last_applied_at = time.monotonic()
+
+        # 只在相应数据段变化时发信号。这样采集中的 tasks/accounts 更新不会
+        # 触发线索、互动、发布、诊断页面的模型重建。
+        if any(previous.get(key) != self._view.get(key)
+               for key in ("overview", "tasks", "accounts")):
+            self.snapshotChanged.emit()
+        if previous.get("leads") != self._view.get("leads") or \
+                previous.get("lead_meta") != self._view.get("lead_meta"):
+            self.leadsChanged.emit()
+        if previous.get("interactions") != self._view.get("interactions") or \
+                previous.get("interaction_meta") != self._view.get("interaction_meta"):
+            self.interactionsChanged.emit()
+        if previous.get("publishing") != self._view.get("publishing"):
+            self.publishingChanged.emit()
+        if previous.get("diagnostics") != self._view.get("diagnostics"):
+            self.diagnosticsChanged.emit()
+
+        # 页面/连接状态仍使用通用信号，兼容已有的页面切换绑定。
+        if any(previous.get(key) != self._view.get(key)
+               for key in ("page", "page_index", "page_label", "connection", "last_error")):
+            self.viewChanged.emit()
 
     @Slot(object)
     def _apply_log(self, _payload: dict) -> None:
@@ -350,15 +416,15 @@ class QmlBridge(QObject):
     def lastError(self) -> str:
         return str(self._view.get("last_error") or "")
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=snapshotChanged)
     def snapshotJson(self) -> str:
         return json.dumps(self._view.get("overview") or {}, ensure_ascii=False)
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=snapshotChanged)
     def taskRows(self):
         return list(self._view.get("tasks") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=snapshotChanged)
     def accountRows(self):
         return list(self._view.get("accounts") or [])
 
@@ -366,56 +432,56 @@ class QmlBridge(QObject):
     def keywordGroups(self):
         return list(self._keyword_groups)
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=leadsChanged)
     def leadRows(self):
         return list(self._view.get("leads") or [])
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=leadsChanged)
     def leadTotal(self) -> int:
         return int((self._view.get("lead_meta") or {}).get("total") or 0)
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=leadsChanged)
     def leadPage(self) -> int:
         return int((self._view.get("lead_meta") or {}).get("page") or 1)
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=leadsChanged)
     def leadPages(self) -> int:
         return int((self._view.get("lead_meta") or {}).get("pages") or 0)
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=leadsChanged)
     def leadTaskOptions(self):
         return list((self._view.get("lead_meta") or {}).get("tasks") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=leadsChanged)
     def leadProvinceOptions(self):
         return list((self._view.get("lead_meta") or {}).get("provinces") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=leadsChanged)
     def leadStats(self):
         return dict((self._view.get("lead_meta") or {}).get("stats") or {})
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=interactionsChanged)
     def interactionRows(self):
         return list(self._view.get("interactions") or [])
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=interactionsChanged)
     def interactionTotal(self) -> int:
         return int((self._view.get("interaction_meta") or {}).get("total") or 0)
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=interactionsChanged)
     def interactionPage(self) -> int:
         return int((self._view.get("interaction_meta") or {}).get("page") or 1)
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=interactionsChanged)
     def interactionPages(self) -> int:
         return int((self._view.get("interaction_meta") or {}).get("pages") or 0)
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=interactionsChanged)
     def interactionStatus(self) -> str:
         """当前列表数据对应的后台状态，用于阻止旧请求结果串到新页签。"""
         return str((self._view.get("interaction_meta") or {}).get("status") or "draft")
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=interactionsChanged)
     def interactionType(self) -> str:
         """当前互动列表对应的互动类型，避免评论/私信请求串页。"""
         return str(
@@ -424,112 +490,112 @@ class QmlBridge(QObject):
             )
         )
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=interactionsChanged)
     def interactionAccounts(self):
         return list((self._view.get("interaction_meta") or {}).get("accounts") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=interactionsChanged)
     def interactionTemplates(self):
         return list((self._view.get("interaction_meta") or {}).get("templates") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=interactionsChanged)
     def interactionCustomVariables(self):
         return list((self._view.get("interaction_meta") or {}).get("custom_variables") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishDraftRows(self):
         return list((self._view.get("publishing") or {}).get("items") or [])
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=publishingChanged)
     def publishTotal(self) -> int:
         return int((self._view.get("publishing") or {}).get("total") or 0)
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=publishingChanged)
     def publishPage(self) -> int:
         return int((self._view.get("publishing") or {}).get("page") or 1)
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=publishingChanged)
     def publishPages(self) -> int:
         return int((self._view.get("publishing") or {}).get("pages") or 0)
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishStatusOptions(self):
         return list((self._view.get("publishing") or {}).get("status_options") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishPlatformOptions(self):
         return list((self._view.get("publishing") or {}).get("platform_options") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishAccountContentRows(self):
         return list((self._view.get("publishing") or {}).get("account_contents") or [])
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=publishingChanged)
     def publishAccountContentTotal(self) -> int:
         return int((self._view.get("publishing") or {}).get("account_content_total") or 0)
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=publishingChanged)
     def publishAccountContentSyncSource(self) -> str:
         return str((self._view.get("publishing") or {}).get("account_content_sync_source") or "")
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=publishingChanged)
     def publishAccountContentSyncStatus(self) -> str:
         return str((self._view.get("publishing") or {}).get("account_content_sync_status") or "")
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=publishingChanged)
     def publishAccountContentSyncError(self) -> str:
         return str((self._view.get("publishing") or {}).get("account_content_sync_error") or "")
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=publishingChanged)
     def publishAccountContentProfileUrl(self) -> str:
         return str((self._view.get("publishing") or {}).get("account_content_profile_url") or "")
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishAccountContentComments(self):
         return list((self._view.get("publishing") or {}).get("account_content_comments") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishGeneratedContents(self):
         return list((self._view.get("publishing") or {}).get("generated_contents") or [])
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=publishingChanged)
     def publishGeneratedTotal(self) -> int:
         return int((self._view.get("publishing") or {}).get("generated_total") or 0)
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishMessageRows(self):
         return list((self._view.get("publishing") or {}).get("messages") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishMessageGroups(self):
         return list((self._view.get("publishing") or {}).get("message_groups") or [])
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=publishingChanged)
     def publishMessageTotal(self) -> int:
         return int((self._view.get("publishing") or {}).get("message_total") or 0)
 
-    @Property(int, notify=viewChanged)
+    @Property(int, notify=publishingChanged)
     def publishMessageUnread(self) -> int:
         return int((self._view.get("publishing") or {}).get("message_unread") or 0)
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishMessageTypeOptions(self):
         return list((self._view.get("publishing") or {}).get("message_type_options") or [])
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=publishingChanged)
     def publishMessageSyncStatus(self) -> str:
         return str((self._view.get("publishing") or {}).get("message_sync_status") or "")
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=publishingChanged)
     def publishMessageSyncSummary(self):
         return dict((self._view.get("publishing") or {}).get("message_sync_summary") or {})
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=snapshotChanged)
     def diagnosticHealthRows(self):
         # 统一走状态模型，补齐旧库缺失的平台并提供中文平台/状态标签。
         return list(self._bridge.state.diagnostic_health_rows())
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=diagnosticsChanged)
     def diagnosticAccountRows(self):
         return list((self._view.get("diagnostics") or {}).get("accounts") or [])
 
@@ -537,39 +603,39 @@ class QmlBridge(QObject):
     def diagnosticLogs(self):
         return list((self._view.get("diagnostics") or {}).get("logs") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=diagnosticsChanged)
     def diagnosticLogStats(self):
         return dict((self._view.get("diagnostics") or {}).get("log_stats") or {})
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=diagnosticsChanged)
     def diagnosticBitBrowser(self):
         return dict((self._view.get("diagnostics") or {}).get("bitbrowser") or {})
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=diagnosticsChanged)
     def diagnosticLlmApi(self):
         return dict((self._view.get("diagnostics") or {}).get("llm_api") or {})
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=diagnosticsChanged)
     def diagnosticTiebaApi(self):
         return dict((self._view.get("diagnostics") or {}).get("tieba_api") or {})
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=diagnosticsChanged)
     def diagnosticBitBrowserChecks(self):
         return list(((self._view.get("diagnostics") or {}).get("bitbrowser_inspection") or {}).get("checks") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=diagnosticsChanged)
     def diagnosticBitBrowserWindows(self):
         return list(((self._view.get("diagnostics") or {}).get("bitbrowser_inspection") or {}).get("windows") or [])
 
-    @Property("QVariant", notify=viewChanged)
+    @Property("QVariant", notify=diagnosticsChanged)
     def diagnosticLiveHealthRows(self):
         return list(((self._view.get("diagnostics") or {}).get("live_health") or {}).get("rows") or [])
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=diagnosticsChanged)
     def diagnosticExportPath(self) -> str:
         return str((self._view.get("diagnostics") or {}).get("export_path") or "")
 
-    @Property(str, notify=viewChanged)
+    @Property(str, notify=diagnosticsChanged)
     def diagnosticCheckedAt(self) -> str:
         return str((self._view.get("diagnostics") or {}).get("checked_at") or "")
 
@@ -2007,21 +2073,21 @@ class QmlBridge(QObject):
 
     @Slot(int)
     def startTask(self, task_id: int) -> None:
-        self._run_command_async("start", {"task_id": int(task_id)})
+        self._run_task_command_async("start", int(task_id))
 
     @Slot(int)
     def pauseTask(self, task_id: int) -> None:
-        self._run_command_async("pause", {"task_id": int(task_id)})
+        self._run_task_command_async("pause", int(task_id))
 
     @Slot(int)
     def resumeTask(self, task_id: int) -> None:
         # 1.2 的“继续”不是单独解除暂停，而是恢复人工状态后重新进入
         # Scheduler.start()；否则不完整/已停止任务点击后不会创建阶段线程。
-        self._run_command_async("resume_task", {"task_id": int(task_id)})
+        self._run_task_command_async("resume_task", int(task_id))
 
     @Slot(int)
     def stopTask(self, task_id: int) -> None:
-        self._run_command_async("stop_task", {"task_id": int(task_id)})
+        self._run_task_command_async("stop_task", int(task_id))
 
     @Slot(int)
     def exportTask(self, task_id: int) -> None:
@@ -2088,6 +2154,32 @@ class QmlBridge(QObject):
         self._bridge.command_async(
             command,
             args,
+            timeout=timeout,
+            on_success=on_success,
+            on_error=on_error,
+        )
+
+    def _run_task_command_async(self, command: str, task_id: int) -> None:
+        """异步执行任务控制，并在完成时只解锁对应任务行。"""
+        tid = int(task_id)
+
+        def on_success(_result):
+            self._bridge.refresh_async()
+            self.commandFinished.emit(command, True, "")
+            self.taskCommandFinished.emit(tid, command, True, "")
+
+        def on_error(exc):
+            self._on_command_error(exc)
+            message = self._error_message(exc)
+            self.commandFinished.emit(command, False, message)
+            self.taskCommandFinished.emit(tid, command, False, message)
+
+        # 搜索启动可能包含浏览器等待，最长约 180 秒；不能沿用 10 秒的
+        # 默认 RPC 超时，否则前端会误报失败并提前解锁按钮，用户容易重复点击。
+        timeout = 240.0 if command in {"start", "resume_task"} else None
+        self._bridge.command_async(
+            command,
+            {"task_id": tid},
             timeout=timeout,
             on_success=on_success,
             on_error=on_error,
